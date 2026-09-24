@@ -152,7 +152,7 @@ If that works, install the APK with the full path:
 From the project folder:
 
 ```powershell
-cd D:\programming\13-voice_noter_pwa\android-keyboard-companion
+cd D:\programming\23-voice_noter_pwa\android-keyboard-companion
 gradle wrapper
 .\gradlew.bat assembleDebug
 & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" devices
