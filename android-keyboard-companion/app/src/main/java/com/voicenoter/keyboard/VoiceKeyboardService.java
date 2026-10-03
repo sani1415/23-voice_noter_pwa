@@ -1349,7 +1349,9 @@ public class VoiceKeyboardService extends InputMethodService {
         );
         int menuHeight = menu.getMeasuredHeight();
 
-        presetPopup = new PopupWindow(menu, menuWidth, LinearLayout.LayoutParams.WRAP_CONTENT, true);
+        // Not focusable: a focusable popup steals window focus, which makes web views
+        // (Chrome, WebView apps) drop the text field and close the keyboard.
+        presetPopup = new PopupWindow(menu, menuWidth, LinearLayout.LayoutParams.WRAP_CONTENT, false);
         presetPopup.setElevation(dp(10));
         presetPopup.setBackgroundDrawable(null);
         presetPopup.setOutsideTouchable(true);
@@ -1424,7 +1426,8 @@ public class VoiceKeyboardService extends InputMethodService {
         );
         int menuHeight = menu.getMeasuredHeight();
 
-        globePopup = new PopupWindow(menu, menuWidth, LinearLayout.LayoutParams.WRAP_CONTENT, true);
+        // Not focusable, see presetPopup: switching language must not blur the web page's input.
+        globePopup = new PopupWindow(menu, menuWidth, LinearLayout.LayoutParams.WRAP_CONTENT, false);
         globePopup.setElevation(dp(10));
         globePopup.setBackgroundDrawable(null);
         globePopup.setOutsideTouchable(true);
@@ -1495,7 +1498,8 @@ public class VoiceKeyboardService extends InputMethodService {
         );
         int popupHeight = panel.getMeasuredHeight();
 
-        symbolPopup = new PopupWindow(panel, popupWidth, LinearLayout.LayoutParams.WRAP_CONTENT, true);
+        // Not focusable, see presetPopup.
+        symbolPopup = new PopupWindow(panel, popupWidth, LinearLayout.LayoutParams.WRAP_CONTENT, false);
         symbolPopup.setElevation(dp(10));
         symbolPopup.setBackgroundDrawable(null);
         symbolPopup.setOutsideTouchable(true);
