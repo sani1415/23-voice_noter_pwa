@@ -16,6 +16,7 @@ import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.util.Base64;
 import android.view.Gravity;
@@ -78,15 +79,36 @@ public class VoiceKeyboardService extends InputMethodService {
         "\u0985", "\u0986", "\u0987", "\u0988", "\u0989", "\u098A",
         "\u098F", "\u0990", "\u0993", "\u0994"
     };
+    // Long-press on the bottom-left more key (Bangla page 1).
     private static final String[] BN_DANDA_POPUP_SYMBOLS = {
-        "\u09CC", "\u09C8", "\u09C3", "\u09C2", "\u0982", "\u0983", "\u0981",
-        "\u09CE", "\u09E0", "\u098C", "\u09F3", "\u20AC", "\u2018", "\u2019",
-        "\u0965"
+        "?", "!", "\u0982", "\u0983", "\u0981",
+        "\u09CE", "\u09C3", "\u098B", "\u09F3", "\u0965",
+        "\u2018", "\u2019", "\"", "-", "\u2026"
     };
-    private static final String[] BN_KAR_SUFFIXES = {
-        "", "\u09BE", "\u09BF", "\u09C0", "\u09C1", "\u09C2",
-        "\u09C7", "\u09C8", "\u09CB", "\u09CC"
+    // \u09BE \u09BF \u09C0 \u09C1 \u09C2 \u09C3 \u09C7 \u09C8 \u09CB \u09CC \u2014 shown as "<cluster before caret> + sign", committed as the sign alone.
+    private static final String[] BN_KAR_SIGNS = {
+        "\u09BE", "\u09BF", "\u09C0", "\u09C1", "\u09C2",
+        "\u09C3", "\u09C7", "\u09C8", "\u09CB", "\u09CC"
     };
+    private static final String DOTTED_CIRCLE = "\u25CC";
+    private static final String[] BN_DIGITS = {
+        "\u09E7", "\u09E8", "\u09E9", "\u09EA", "\u09EB",
+        "\u09EC", "\u09ED", "\u09EE", "\u09EF", "\u09E6"
+    };
+    private static final String[] ASCII_DIGITS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"};
+
+    // Record mode: 16 kHz mono AAC at 32 kbps is plenty for speech and keeps a
+    // 12-minute take (~2.9 MB, ~3.9 MB as base64) under Vercel's 4.5 MB body limit.
+    private static final int RECORD_SAMPLE_RATE = 16000;
+    private static final int RECORD_BIT_RATE = 32000;
+    private static final int MAX_RECORD_MS = 12 * 60 * 1000;
+    private static final long MAX_UPLOAD_AUDIO_BYTES = 3_200_000L;
+    /** Smaller than this after a failed stop() means nothing usable was captured. */
+    private static final long MIN_AUDIO_BYTES = 4096L;
+    /** A recording that could not be transcribed yet; survives keyboard restarts. */
+    private static final String PENDING_AUDIO_NAME = "voice-keyboard-pending.m4a";
+    private static final int COLOR_PENDING = 0xffb26a00;
+    private static final int COLOR_PENDING_SOFT = 0xfffff3e0;
 
     // Long-press alternate characters for the roman QWERTY rows (EN + phonetic BN),
     // native Bangla letters, and Arabic letters with related forms.
@@ -105,6 +127,13 @@ public class VoiceKeyboardService extends InputMethodService {
         EN_LONG_PRESS.put("y", new String[]{"\u00FD"});
         EN_LONG_PRESS.put("'", new String[]{"\u2018", "\u2019", "\u201C", "\u201D", "`"});
         BN_LONG_PRESS.put("\u09A4", new String[]{"\u09CE"});
+        BN_LONG_PRESS.put("\u0982", new String[]{"\u0983", "\u0981"});
+        BN_LONG_PRESS.put("\u098a", new String[]{"\u098b"}); // \u098a \u2192 \u098b, its neighbour in the alphabet
+        BN_LONG_PRESS.put("\u0964", new String[]{"?", "!", "\u0965", ":", ";"});
+        // Hold a Bangla digit for the ASCII one (OTP / phone fields often reject \u09E7\u09E8\u09E9).
+        for (int i = 0; i < BN_DIGITS.length; i++) {
+            BN_LONG_PRESS.put(BN_DIGITS[i], new String[]{ASCII_DIGITS[i]});
+        }
         // Hold ا / و / ي for hamza and alef variants (instead of burying them on more).
         AR_LONG_PRESS.put("\u0627", new String[]{"\u0623", "\u0625", "\u0622", "\u0621", "\u0671"});
         AR_LONG_PRESS.put("\u0648", new String[]{"\u0624"});
@@ -143,6 +172,12 @@ public class VoiceKeyboardService extends InputMethodService {
 
     private MediaRecorder recorder;
     private File audioFile;
+    /** Recording kept after a failed or interrupted transcription; mic tap retries it. */
+    private File pendingAudioFile;
+    /** Transcript that arrived after its text field was gone; mic tap inserts it. */
+    private String pendingTranscript;
+    private boolean numericField = false;
+    private boolean passwordField = false;
     private TextView micLabel;
     private ImageView micModeIcon;
     private TextView micHoldHint;
@@ -222,6 +257,13 @@ public class VoiceKeyboardService extends InputMethodService {
     private EditorInfo currentEditorInfo;
 
     @Override
+    public void onCreate() {
+        super.onCreate();
+        File pending = new File(getFilesDir(), PENDING_AUDIO_NAME);
+        if (pending.exists() && pending.length() > 0) pendingAudioFile = pending;
+    }
+
+    @Override
     public View onCreateInputView() {
         loadPreferences();
         prefetchSonioxKeyIfNeeded();
@@ -233,19 +275,49 @@ public class VoiceKeyboardService extends InputMethodService {
     public void onStartInputView(EditorInfo attribute, boolean restarting) {
         super.onStartInputView(attribute, restarting);
         currentEditorInfo = attribute;
+        int inputType = attribute != null ? attribute.inputType : 0;
+        numericField = isNumericInputType(inputType);
+        passwordField = isPasswordInputType(inputType);
         if (settingsChangedSinceBuild()) {
             loadPreferences();
+            morePage = numericField;
             setInputView(buildInputView());
         } else {
             // Settings Activity can change Record/Live while the IME process stays alive.
             // Always re-read that so the mic label matches the saved preference.
             reloadVoiceInputModeFromPrefs();
+            // A new field opens on letters, or straight on the digit page for
+            // number / phone / date fields. Restarts of the same field keep the page.
+            if (!restarting && morePage != numericField) {
+                morePage = numericField;
+                resetBnKarState();
+                rebuildLetterRows();
+            }
         }
         refreshEnterKeyLabel();
         updateMicButtonAppearance();
         prefetchSonioxKeyIfNeeded();
         loadBnDictionaryIfNeeded();
-        refreshSuggestions();
+        onTextContextChanged();
+    }
+
+    private static boolean isNumericInputType(int inputType) {
+        int cls = inputType & InputType.TYPE_MASK_CLASS;
+        return cls == InputType.TYPE_CLASS_NUMBER
+            || cls == InputType.TYPE_CLASS_PHONE
+            || cls == InputType.TYPE_CLASS_DATETIME;
+    }
+
+    private static boolean isPasswordInputType(int inputType) {
+        int cls = inputType & InputType.TYPE_MASK_CLASS;
+        int variation = inputType & InputType.TYPE_MASK_VARIATION;
+        if (cls == InputType.TYPE_CLASS_TEXT) {
+            return variation == InputType.TYPE_TEXT_VARIATION_PASSWORD
+                || variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                || variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD;
+        }
+        return cls == InputType.TYPE_CLASS_NUMBER
+            && variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD;
     }
 
     private void reloadVoiceInputModeFromPrefs() {
@@ -336,7 +408,13 @@ public class VoiceKeyboardService extends InputMethodService {
             stopLive();
         }
         if (isRecording) {
-            cancelRecordingQuietly();
+            // The field is going away, so there is nowhere to type the result.
+            // Keep the take instead of throwing it away; a mic tap sends it later.
+            File finished = stopRecordingToFile();
+            if (finished != null) {
+                keepAsPendingAudio(finished);
+                setStatus("রেকর্ডিং রাখা আছে — মাইকে চাপলে লেখা হবে");
+            }
         }
     }
 
@@ -435,6 +513,11 @@ public class VoiceKeyboardService extends InputMethodService {
         });
         wrap.setOnLongClickListener(v -> {
             if (isRecording || isLiveActive || isTranscribing) return false;
+            if (pendingTranscript != null || pendingAudioFile != null) {
+                performKeyHaptic(v);
+                discardPendingVoice();
+                return true;
+            }
             finalizePendingComposing();
             toggleVoiceInputMode();
             return true;
@@ -575,6 +658,11 @@ public class VoiceKeyboardService extends InputMethodService {
             boolean useDari = MainActivity.LANG_BN.equals(layoutLang);
             commitText(useDari ? "\u0964" : ".");
         }, bottomKeyHeightDp);
+        rightPunctButton.setOnLongClickListener(v -> {
+            performKeyHaptic(v);
+            showSymbolPopup(v, bottomPunctAltsFor(layoutLang));
+            return true;
+        });
         row.addView(rightPunctButton, weighted(bottomKeyHeightDp, 0.5f));
 
         enterKeyButton = new Button(this);
@@ -592,6 +680,17 @@ public class VoiceKeyboardService extends InputMethodService {
         refreshEnterKeyLabel();
 
         return row;
+    }
+
+    /** Long-press set of the bottom-row full-stop key: the question mark first. */
+    private static String[] bottomPunctAltsFor(String lang) {
+        if (MainActivity.LANG_BN.equals(lang)) {
+            return new String[]{"?", "!", "॥", ".", ":", ";", "\"", "'", "-", "…"};
+        }
+        if (MainActivity.LANG_AR.equals(lang)) {
+            return new String[]{"؟", "!", "،", "؛", ":", ".", "\"", "'", "-", "…"};
+        }
+        return new String[]{"?", "!", ",", ":", ";", "\"", "'", "-", "@", "…"};
     }
 
     private void configureSpaceKey(Button space) {
@@ -615,12 +714,16 @@ public class VoiceKeyboardService extends InputMethodService {
                     // Swipe up on space → cycle language (Gboard-like).
                     if (!cursorSwipe[0] && !langSwipe[0] && dy < -langSwipePx && Math.abs(dy) > Math.abs(dx)) {
                         langSwipe[0] = true;
+                        // From here on this listener eats the events, so the Button never
+                        // sees UP and its pending long-press (= switch language) would fire.
+                        v.cancelLongPress();
                         performKeyHaptic(v);
                         cycleLayoutLanguage();
                         return true;
                     }
                     if (!langSwipe[0] && Math.abs(dx) >= stepPx && Math.abs(dx) > Math.abs(dy)) {
                         int steps = (int) (dx / stepPx);
+                        if (!cursorSwipe[0]) v.cancelLongPress();
                         moveCursorBy(steps);
                         startX[0] += steps * stepPx;
                         cursorSwipe[0] = true;
@@ -634,6 +737,11 @@ public class VoiceKeyboardService extends InputMethodService {
                     boolean consumed = cursorSwipe[0] || langSwipe[0];
                     cursorSwipe[0] = false;
                     langSwipe[0] = false;
+                    if (consumed) {
+                        // The Button won't get this UP, so clear its pressed look ourselves.
+                        v.setPressed(false);
+                        v.cancelLongPress();
+                    }
                     return consumed;
                 }
                 default:
@@ -676,7 +784,7 @@ public class VoiceKeyboardService extends InputMethodService {
             if (ic != null) {
                 CharSequence before = ic.getTextBeforeCursor(2, 0);
                 if (before != null && before.length() == 2 && before.charAt(1) == ' '
-                    && Character.isLetterOrDigit(before.charAt(0))) {
+                    && endsWord(before.charAt(0))) {
                     ic.deleteSurroundingText(1, 0);
                     boolean dari = MainActivity.LANG_BN.equals(layoutLang);
                     commitText(dari ? "\u0964 " : ". ");
@@ -689,6 +797,16 @@ public class VoiceKeyboardService extends InputMethodService {
         commitText(" ");
         lastKeyWasSpace = true;
         lastSpaceCommitMs = now;
+    }
+
+    /**
+     * Whether {@code c} can end a word. Bengali vowel signs and ং/ঁ are combining
+     * marks, not letters, yet most Bangla words end in one ("আমি", "বাংলা").
+     */
+    private static boolean endsWord(char c) {
+        if (Character.isLetterOrDigit(c)) return true;
+        int type = Character.getType(c);
+        return type == Character.NON_SPACING_MARK || type == Character.COMBINING_SPACING_MARK;
     }
 
     private void rebuildLetterRows() {
@@ -713,6 +831,7 @@ public class VoiceKeyboardService extends InputMethodService {
         refreshShiftVisuals();
         refreshBottomRowForLanguage();
         updateMoreKeyIcon();
+        syncBnRow1WithText();
     }
 
     private void refreshBottomRowForLanguage() {
@@ -731,16 +850,11 @@ public class VoiceKeyboardService extends InputMethodService {
     }
 
     private String[] row1Keys() {
-        if (!bnRow1Vowels && bnKarBase != null) {
-            return buildBnKarKeys(bnKarBase);
-        }
-        return BN_VOWEL_ROW;
-    }
-
-    private String[] buildBnKarKeys(String consonant) {
-        String[] keys = new String[BN_KAR_SUFFIXES.length];
-        for (int i = 0; i < BN_KAR_SUFFIXES.length; i++) {
-            keys[i] = consonant + BN_KAR_SUFFIXES[i];
+        if (bnRow1Vowels) return BN_VOWEL_ROW;
+        String base = bnKarBase != null ? bnKarBase : DOTTED_CIRCLE;
+        String[] keys = new String[BN_KAR_SIGNS.length];
+        for (int i = 0; i < BN_KAR_SIGNS.length; i++) {
+            keys[i] = base + BN_KAR_SIGNS[i];
         }
         return keys;
     }
@@ -750,14 +864,10 @@ public class VoiceKeyboardService extends InputMethodService {
         bnRow1Vowels = true;
     }
 
+    /** Kar toggle: flip the row by hand until the text before the caret changes again. */
     private void toggleBnVowelRow() {
         if (!bnDynamicRow1Enabled()) return;
-        if (bnRow1Vowels) {
-            if (bnKarBase == null) return;
-            bnRow1Vowels = false;
-        } else {
-            bnRow1Vowels = true;
-        }
+        bnRow1Vowels = !bnRow1Vowels;
         refreshBnRow1();
     }
 
@@ -783,18 +893,60 @@ public class VoiceKeyboardService extends InputMethodService {
         styleKeyBackground(karToggleKey, !bnRow1Vowels);
     }
 
-    private void onConsonantTyped(String consonant) {
-        if (!bnDynamicRow1Enabled()) return;
-        bnKarBase = consonant;
-        bnRow1Vowels = false;
+    /**
+     * Row 1 follows the text: kar signs right after a consonant (or conjunct),
+     * independent vowels anywhere else. Reading the real text, instead of
+     * remembering the last consonant key, keeps the row right after space,
+     * delete, cursor moves and voice input.
+     */
+    private void syncBnRow1WithText() {
+        if (!bnDynamicRow1Enabled() || bnRow1Layout == null) return;
+        String base = bnKarBaseBeforeCursor();
+        boolean vowels = base == null;
+        if (vowels == bnRow1Vowels && TextUtils.equals(base, bnKarBase)) return;
+        bnKarBase = base;
+        bnRow1Vowels = vowels;
         refreshBnRow1();
     }
 
+    /** The consonant cluster right before the caret ("ক", "ক্ষ", "ব্য", "য়"), or null. */
+    private String bnKarBaseBeforeCursor() {
+        CharSequence before;
+        if (presetComposeActive && presetComposeInput != null) {
+            int caret = presetComposeInput.getSelectionStart();
+            if (caret < 0 || caret != presetComposeInput.getSelectionEnd()) return null;
+            CharSequence all = presetComposeInput.getText();
+            before = all.subSequence(Math.max(0, caret - 12), caret);
+        } else {
+            InputConnection ic = getCurrentInputConnection();
+            if (ic == null) return null;
+            CharSequence selected = ic.getSelectedText(0);
+            if (selected != null && selected.length() > 0) return null;
+            before = ic.getTextBeforeCursor(12, 0);
+        }
+        if (before == null) return null;
+        int end = before.length();
+        int i = end;
+        if (i > 0 && before.charAt(i - 1) == '\u09BC') i--; // nukta: য় ড় ঢ় typed decomposed
+        if (i == 0 || !isBnConsonant(before.charAt(i - 1))) return null;
+        i--;
+        // Include up to two "consonant + hasanta" links so the key shows the whole conjunct.
+        for (int links = 0; links < 2 && i >= 2
+            && before.charAt(i - 1) == '\u09CD' && isBnConsonant(before.charAt(i - 2)); links++) {
+            i -= 2;
+        }
+        return before.subSequence(i, end).toString();
+    }
+
+    private static boolean isBnConsonant(char c) {
+        return (c >= '\u0995' && c <= '\u09B9') || c == '\u09DC' || c == '\u09DD' || c == '\u09DF';
+    }
+
     private void onRow1KeyPressed(String key) {
-        if (bnDynamicRow1Enabled() && !bnRow1Vowels && bnKarBase != null
-            && key.length() > bnKarBase.length() && key.startsWith(bnKarBase)) {
-            deleteBackward();
-            commitText(key);
+        if (bnDynamicRow1Enabled() && !bnRow1Vowels) {
+            // The key shows "cluster + sign" but only the sign is typed: the cluster
+            // is already in the text, so nothing has to be deleted first.
+            commitText(key.substring(key.length() - 1));
             return;
         }
         commitText(key);
@@ -802,9 +954,6 @@ public class VoiceKeyboardService extends InputMethodService {
 
     private void onLetterKeyPressed(String key) {
         commitText(key);
-        if (isBnKarTrigger(key)) {
-            onConsonantTyped(key);
-        }
     }
 
     private void onQwertyLetterPressed(Button button) {
@@ -816,11 +965,10 @@ public class VoiceKeyboardService extends InputMethodService {
         }
     }
 
-    private boolean isBnKarTrigger(String key) {
-        if (key == null || key.length() != 1) return false;
-        char c = key.charAt(0);
-        if (c >= '\u0985' && c <= '\u0994') return false;
-        return (c >= '\u0995' && c <= '\u09B9') || c == '\u09DC' || c == '\u09DD' || c == '\u09CE';
+    /** Text before the caret changed: refresh everything that reads it. */
+    private void onTextContextChanged() {
+        refreshSuggestions();
+        syncBnRow1WithText();
     }
 
     private void finalizePendingComposing() {
@@ -877,7 +1025,7 @@ public class VoiceKeyboardService extends InputMethodService {
         if (suggestionBar == null) return;
         BanglaDictionary dict = bnDictionary;
         boolean available = dict != null && MainActivity.LANG_BN.equals(layoutLang)
-            && !presetComposeActive;
+            && !presetComposeActive && !passwordField;
         suggestionBar.setVisibility(available ? View.VISIBLE : View.GONE);
         if (!available) return;
         java.util.List<String> words = dict.suggest(currentBnPartialWord(), suggestionViews.length);
@@ -924,7 +1072,7 @@ public class VoiceKeyboardService extends InputMethodService {
                                   int candidatesStart, int candidatesEnd) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd,
             candidatesStart, candidatesEnd);
-        refreshSuggestions();
+        onTextContextChanged();
         trackLiveSelectionChange(newSelStart, newSelEnd);
     }
 
@@ -1017,13 +1165,14 @@ public class VoiceKeyboardService extends InputMethodService {
         // No separate Back key — bottom-left more key toggles back to page 1.
         // Keep delete on the last row (same corner as page 1).
         String[][] nums = numberRowsFor(lang);
-        if (MainActivity.LANG_BN.equals(lang)) {
+        if (MainActivity.LANG_BN.equals(lang) && !numericField) {
             return new String[][]{
                 nums[0],
                 nums[1],
                 nums[2],
-                {"\u09CC", "\u09C8", "\u09C3", "\u09C2", "\u0982", "\u0983", "\u0981", "\u09CE", "\u2018", "\u2019"},
-                {"\u09E0", "\u098B", "\u098C", "\u09F3", "\u20AC", "\u0965", "~", "`", "|", TOK_DELETE},
+                // ং ঃ ঁ ৎ ঋ ৃ ॥ ‘ ’ …
+                {"\u0982", "\u0983", "\u0981", "\u09CE", "\u098B", "\u09C3", "\u0965", "\u2018", "\u2019", "\u2026"},
+                {"\u20AC", "<", ">", "[", "]", "{", "}", "~", "|", TOK_DELETE},
             };
         }
         return new String[][]{
@@ -1037,18 +1186,25 @@ public class VoiceKeyboardService extends InputMethodService {
     private String[][] numberRowsFor(String lang) {
         String[] symbolsA = {"@", "#", "$", "%", "&", "*", "-", "+", "(", ")"};
         String[] symbolsB = {"!", "\"", "'", ":", ";", "/", "?", "_", ".", "="};
+        // Number / phone / date fields always get ASCII digits: many apps (OTP,
+        // bKash, phone numbers) reject Bangla or Arabic-Indic digits.
+        if (numericField) {
+            return new String[][]{ASCII_DIGITS, symbolsA, symbolsB};
+        }
         if (MainActivity.LANG_BN.equals(lang)) {
             return new String[][]{
-                {"\u09E7", "\u09E8", "\u09E9", "\u09EA", "\u09EB", "\u09EC", "\u09ED", "\u09EE", "\u09EF", "\u09E6"},
+                BN_DIGITS,
                 symbolsA,
-                {"\u09F3", "\u20AC", "<", ">", "[", "]", "{", "}", "\u0964", "="},
+                // ৳ ? ! : ; " ' / । =
+                {"\u09F3", "?", "!", ":", ";", "\"", "'", "/", "\u0964", "="},
             };
         }
         if (MainActivity.LANG_AR.equals(lang)) {
             return new String[][]{
                 {"\u0661", "\u0662", "\u0663", "\u0664", "\u0665", "\u0666", "\u0667", "\u0668", "\u0669", "\u0660"},
                 symbolsA,
-                symbolsB,
+                // Arabic ؛ ؟ ، in place of the Latin ; ? .
+                {"!", "\"", "'", ":", "\u061B", "/", "\u061F", "_", "\u060C", "="},
             };
         }
         return new String[][]{
@@ -1079,7 +1235,8 @@ public class VoiceKeyboardService extends InputMethodService {
             {"\u0995", "\u0996", "\u0997", "\u0998", "\u0999", "\u099A", "\u099B", "\u099C", "\u099D", "\u099E"},
             {"\u099F", "\u09A0", "\u09A1", "\u09A2", "\u09A3", "\u09A4", "\u09A5", "\u09A6", "\u09A7", "\u09A8"},
             {"\u09AA", "\u09AB", "\u09AC", "\u09AD", "\u09AE", "\u09AF", "\u09B0", "\u09B2", "\u09B6", "\u09B7"},
-            {"\u09B8", "\u09B9", "\u09DC", "\u09DD", "\u09CD\u09AF", "\u09AF\u09BC", ",", "\u09CD", "\u0964", TOK_DELETE},
+            // ং replaces a second comma (the bottom row already has one); hold it for ঃ ঁ.
+            {"\u09B8", "\u09B9", "\u09DC", "\u09DD", "\u09CD\u09AF", "\u09AF\u09BC", "\u0982", "\u09CD", "\u0964", TOK_DELETE},
         };
     }
 
@@ -1192,7 +1349,7 @@ public class VoiceKeyboardService extends InputMethodService {
         presetComposeActive = true;
         presetComposeInput.setText("");
         presetComposeInput.requestFocus();
-        refreshSuggestions();
+        onTextContextChanged();
     }
 
     private void hidePresetCompose() {
@@ -1203,7 +1360,7 @@ public class VoiceKeyboardService extends InputMethodService {
         if (presetComposeInput != null) {
             presetComposeInput.setText("");
         }
-        refreshSuggestions();
+        onTextContextChanged();
     }
 
     private void savePresetCompose() {
@@ -1644,7 +1801,7 @@ public class VoiceKeyboardService extends InputMethodService {
         resetBnKarState();
         rebuildLetterRows();
         savePreferences();
-        refreshSuggestions();
+        onTextContextChanged();
     }
 
     private void toggleKeyboardPanel() {
@@ -1762,7 +1919,10 @@ public class VoiceKeyboardService extends InputMethodService {
     public void onDestroy() {
         voiceSessionGeneration++;
         stopLiveQuietly();
-        cancelRecordingQuietly();
+        if (isRecording) {
+            File finished = stopRecordingToFile();
+            if (finished != null) keepAsPendingAudio(finished);
+        }
         mainHandler.removeCallbacks(repeatDeleteRunnable);
         mainHandler.removeCallbacks(voiceTimerRunnable);
         executor.shutdownNow();
@@ -1785,6 +1945,24 @@ public class VoiceKeyboardService extends InputMethodService {
 
     private void toggleVoiceInput() {
         finalizePendingComposing();
+        if (isTranscribing) {
+            // Starting another take now would orphan the transcript still on its way.
+            setStatus("আগের রেকর্ডিং লেখা হচ্ছে, একটু অপেক্ষা করুন");
+            return;
+        }
+        boolean idle = !isRecording && !isLiveActive;
+        if (idle && pendingTranscript != null) {
+            insertPendingTranscript();
+            return;
+        }
+        if (idle && pendingAudioFile != null) {
+            retryPendingAudio();
+            return;
+        }
+        if (idle && passwordField) {
+            setStatus("পাসওয়ার্ডের ঘরে ভয়েস বন্ধ");
+            return;
+        }
         if (MainActivity.MODE_LIVE.equals(voiceInputMode)) {
             if (isLiveActive) stopLive();
             else startLive();
@@ -1803,27 +1981,33 @@ public class VoiceKeyboardService extends InputMethodService {
         int iconRes = isLiveMode ? R.drawable.ic_live : R.drawable.ic_mic;
 
         if (isTranscribing) {
-            applyMicKeyStyle(COLOR_RECORD, COLOR_RECORD, "Transcribing…", R.drawable.ic_mic, true, false);
+            applyMicKeyStyle(COLOR_RECORD, COLOR_RECORD, "Transcribing…", R.drawable.ic_mic, true, null);
         } else if (isLiveConnecting) {
-            applyMicKeyStyle(COLOR_LIVE, COLOR_LIVE, "...", R.drawable.ic_live, true, false);
+            applyMicKeyStyle(COLOR_LIVE, COLOR_LIVE, "...", R.drawable.ic_live, true, null);
         } else if (isLiveActive) {
-            applyMicKeyStyle(COLOR_LIVE, COLOR_LIVE, formatVoiceElapsed(), R.drawable.ic_live, true, false);
+            applyMicKeyStyle(COLOR_LIVE, COLOR_LIVE, formatVoiceElapsed(), R.drawable.ic_live, true, null);
         } else if (isRecording) {
-            applyMicKeyStyle(COLOR_RECORD, COLOR_RECORD, formatVoiceElapsed(), R.drawable.ic_mic, true, false);
+            applyMicKeyStyle(COLOR_RECORD, COLOR_RECORD, formatVoiceElapsed(), R.drawable.ic_mic, true, null);
+        } else if (pendingTranscript != null) {
+            applyMicKeyStyle(COLOR_PENDING_SOFT, COLOR_PENDING, "বসান", R.drawable.ic_arrow_down, false,
+                "ধরে রাখুন: বাদ");
+        } else if (pendingAudioFile != null) {
+            applyMicKeyStyle(COLOR_PENDING_SOFT, COLOR_PENDING, "আবার", R.drawable.ic_undo, false,
+                "ধরে রাখুন: বাদ");
         } else {
-            applyMicKeyStyle(softBg, accent, isLiveMode ? "Live" : "Record", iconRes, false, true);
+            applyMicKeyStyle(softBg, accent, isLiveMode ? "Live" : "Record", iconRes, false, "⇄ mode");
         }
     }
 
     private void applyMicKeyStyle(int bgColor, int accentColor, String label, int iconRes,
-                                  boolean active, boolean showHoldHint) {
+                                  boolean active, String holdHint) {
         micLabel.setText(label);
         micModeIcon.setImageResource(iconRes);
         micModeIcon.setColorFilter(active ? COLOR_ACTIVE_TEXT : accentColor, PorterDuff.Mode.SRC_IN);
         micLabel.setTextColor(active ? COLOR_ACTIVE_TEXT : themeKeyText);
-        micHoldHint.setVisibility(showHoldHint ? View.VISIBLE : View.GONE);
-        if (showHoldHint) {
-            micHoldHint.setText("⇄ mode");
+        micHoldHint.setVisibility(holdHint != null ? View.VISIBLE : View.GONE);
+        if (holdHint != null) {
+            micHoldHint.setText(holdHint);
             micHoldHint.setTextColor(themeMuted);
         }
 
@@ -2238,8 +2422,20 @@ public class VoiceKeyboardService extends InputMethodService {
             recorder.setAudioSource(MediaRecorder.AudioSource.MIC);
             recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
             recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
-            recorder.setAudioSamplingRate(44100);
-            recorder.setAudioEncodingBitRate(96000);
+            recorder.setAudioChannels(1);
+            recorder.setAudioSamplingRate(RECORD_SAMPLE_RATE);
+            recorder.setAudioEncodingBitRate(RECORD_BIT_RATE);
+            recorder.setMaxDuration(MAX_RECORD_MS);
+            recorder.setOnInfoListener((mr, what, extra) -> {
+                if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
+                    mainHandler.post(() -> {
+                        if (isRecording) {
+                            setStatus("১২ মিনিট পূর্ণ — রেকর্ডিং পাঠানো হচ্ছে");
+                            stopAndTranscribe();
+                        }
+                    });
+                }
+            });
             recorder.setOutputFile(audioFile.getAbsolutePath());
             recorder.prepare();
             recorder.start();
@@ -2255,28 +2451,36 @@ public class VoiceKeyboardService extends InputMethodService {
 
     private void stopAndTranscribe() {
         if (!isRecording) return;
-        final int session = voiceSessionGeneration;
-        File finishedFile = audioFile;
-        try {
-            if (recorder != null) {
-                recorder.stop();
-            }
-        } catch (RuntimeException e) {
-            setStatus("Too short");
-            cancelRecordingQuietly();
+        File finished = stopRecordingToFile();
+        if (finished == null) {
+            setStatus("রেকর্ডিং খুব ছোট");
             return;
         }
+        startTranscription(finished);
+    }
 
+    /** Stops the recorder; returns the finished take, or null when nothing usable was captured. */
+    private File stopRecordingToFile() {
+        File file = audioFile;
+        audioFile = null;
+        boolean usable = true;
+        try {
+            if (recorder != null) recorder.stop();
+        } catch (RuntimeException e) {
+            // Thrown for a take that is too short, but also when the max-duration
+            // limit already stopped the recorder; then the file is complete.
+            usable = file != null && file.length() >= MIN_AUDIO_BYTES;
+        }
         stopRecorderQuietly();
-        isTranscribing = true;
-        updateMicButtonAppearance();
-
-        executor.execute(() -> transcribe(finishedFile, session));
+        if (!usable || file == null || !file.exists() || file.length() == 0) {
+            if (file != null) file.delete();
+            return null;
+        }
+        return file;
     }
 
     private void cancelRecordingQuietly() {
         voiceSessionGeneration++;
-        isTranscribing = false;
         stopRecorderQuietly();
         if (audioFile != null) {
             audioFile.delete();
@@ -2284,11 +2488,61 @@ public class VoiceKeyboardService extends InputMethodService {
         }
     }
 
-    private void transcribe(File file, int session) {
+    private void startTranscription(File file) {
+        final int session = voiceSessionGeneration;
+        final String language = layoutLang;
+        isTranscribing = true;
+        updateMicButtonAppearance();
+        executor.execute(() -> transcribe(file, session, language));
+    }
+
+    private void retryPendingAudio() {
+        File file = pendingAudioFile;
+        pendingAudioFile = null;
+        if (file == null || !file.exists() || file.length() == 0) {
+            updateMicButtonAppearance();
+            return;
+        }
+        voiceSessionGeneration++;
+        startTranscription(file);
+    }
+
+    private void insertPendingTranscript() {
+        String text = pendingTranscript;
+        pendingTranscript = null;
+        if (text != null) commitText(text);
+        updateMicButtonAppearance();
+    }
+
+    private void discardPendingVoice() {
+        pendingTranscript = null;
+        if (pendingAudioFile != null) {
+            pendingAudioFile.delete();
+            pendingAudioFile = null;
+        }
+        setStatus("বাদ দেওয়া হলো");
+        updateMicButtonAppearance();
+    }
+
+    /** Parks a take at a fixed path so a mic tap (even after a restart) can send it again. */
+    private void keepAsPendingAudio(File file) {
+        File target = new File(getFilesDir(), PENDING_AUDIO_NAME);
+        if (!file.equals(target)) {
+            target.delete();
+            if (!file.renameTo(target)) target = file;
+        }
+        pendingAudioFile = target;
+        updateMicButtonAppearance();
+    }
+
+    private void transcribe(File file, int session, String language) {
         try {
-            if (session != voiceSessionGeneration) return;
             if (file == null || !file.exists() || file.length() == 0) {
-                finishTranscribe(session, null, "No audio");
+                finishTranscribe(session, file, null, "রেকর্ডিং পাওয়া যায়নি", false);
+                return;
+            }
+            if (file.length() > MAX_UPLOAD_AUDIO_BYTES) {
+                finishTranscribe(session, file, null, "রেকর্ডিং অনেক লম্বা, পাঠানো যায়নি", false);
                 return;
             }
 
@@ -2297,12 +2551,13 @@ public class VoiceKeyboardService extends InputMethodService {
             JSONObject body = new JSONObject();
             body.put("audio", audio);
             body.put("mimeType", MIME_TYPE);
-            body.put("language", layoutLang);
+            body.put("language", language);
 
             HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
             connection.setRequestMethod("POST");
             connection.setConnectTimeout(20000);
-            connection.setReadTimeout(60000);
+            // A 12-minute take can keep Gemini busy for a while.
+            connection.setReadTimeout(240000);
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             connection.setDoOutput(true);
 
@@ -2312,41 +2567,64 @@ public class VoiceKeyboardService extends InputMethodService {
             }
 
             int code = connection.getResponseCode();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(
-                code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream(),
-                StandardCharsets.UTF_8
-            ));
             StringBuilder response = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) response.append(line);
+            java.io.InputStream stream = code >= 200 && code < 300
+                ? connection.getInputStream() : connection.getErrorStream();
+            if (stream != null) {
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) response.append(line);
+                }
+            }
 
             if (code < 200 || code >= 300) {
-                finishTranscribe(session, null, "Failed " + code);
+                // Anything but a malformed or oversized request may work on a retry.
+                boolean retryable = code != 400 && code != 413;
+                finishTranscribe(session, file, null,
+                    retryable ? "লেখা যায়নি (" + code + ") — মাইকে চাপলে আবার চেষ্টা" : "লেখা যায়নি (" + code + ")",
+                    retryable);
                 return;
             }
 
             String text = new JSONObject(response.toString()).optString("text", "").trim();
             if (text.isEmpty()) {
-                finishTranscribe(session, null, "No speech");
+                finishTranscribe(session, file, null, "কোনো কথা শোনা যায়নি", false);
                 return;
             }
 
-            finishTranscribe(session, text, null);
+            finishTranscribe(session, file, text, null, false);
         } catch (Exception e) {
-            finishTranscribe(session, null, "Error");
-        } finally {
-            if (file != null) file.delete();
+            // Network down, timeout, DNS…: keep the take for a retry.
+            finishTranscribe(session, file, null, "নেট সমস্যা — মাইকে চাপলে আবার চেষ্টা", true);
         }
     }
 
-    private void finishTranscribe(int session, String text, String error) {
+    /**
+     * Back on the main thread. The take is deleted only once its text is safely in
+     * a field (or held as a pending transcript); a retryable failure parks it.
+     */
+    private void finishTranscribe(int session, File file, String text, String error, boolean retryable) {
         mainHandler.post(() -> {
-            if (session != voiceSessionGeneration) return;
             isTranscribing = false;
             if (text != null && !text.isEmpty()) {
-                commitText(VoicePunctuation.apply(text));
-            } else if (error != null) {
-                postStatus(error);
+                String finalText = VoicePunctuation.apply(text);
+                if (session == voiceSessionGeneration && getCurrentInputConnection() != null) {
+                    commitText(finalText);
+                } else {
+                    // The field the user dictated into is gone; don't type into whatever
+                    // has focus now. Hold the text until the mic is tapped.
+                    pendingTranscript = finalText;
+                    setStatus("লেখা তৈরি — মাইকে চাপলে বসবে");
+                }
+                if (file != null) file.delete();
+            } else {
+                if (retryable && file != null && file.exists()) {
+                    keepAsPendingAudio(file);
+                } else if (file != null) {
+                    file.delete();
+                }
+                if (error != null) setStatus(error);
             }
             updateMicButtonAppearance();
         });
@@ -2386,6 +2664,7 @@ public class VoiceKeyboardService extends InputMethodService {
             if (start < 0) start = presetComposeInput.getText().length();
             if (end < 0) end = start;
             presetComposeInput.getText().replace(Math.min(start, end), Math.max(start, end), text);
+            syncBnRow1WithText();
             return;
         }
         InputConnection inputConnection = getCurrentInputConnection();
@@ -2400,7 +2679,7 @@ public class VoiceKeyboardService extends InputMethodService {
                 reanchorLiveAtCaretNow(inputConnection);
             }
         }
-        refreshSuggestions();
+        onTextContextChanged();
     }
 
     private void deleteBackward() {
@@ -2486,14 +2765,14 @@ public class VoiceKeyboardService extends InputMethodService {
         performKeyHaptic(source);
         deleteBackward();
         lastKeyWasSpace = false;
-        refreshSuggestions();
+        onTextContextChanged();
     }
 
     private void performWordDelete(View source) {
         performKeyHaptic(source);
         deleteWordBackward();
         lastKeyWasSpace = false;
-        refreshSuggestions();
+        onTextContextChanged();
     }
 
     private void selectAllText() {

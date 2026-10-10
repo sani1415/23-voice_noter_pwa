@@ -51,7 +51,7 @@ public class SonioxLiveTranscriber {
     private String partialText = "";
 
     private Context appContext;
-    private WebSocket webSocket;
+    private volatile WebSocket webSocket;
     private AudioRecord audioRecord;
     private Thread audioThread;
     private Listener listener;
@@ -176,7 +176,7 @@ public class SonioxLiveTranscriber {
                     config.put("language_hints_strict", true);
                     config.put("enable_endpoint_detection", true);
                     socket.send(config.toString());
-                    wsReady.set(true);
+                    // Flushes the early audio, then flips wsReady under the same lock.
                     flushBufferedAudio(socket);
                 } catch (Exception e) {
                     fail(e.getMessage() != null ? e.getMessage() : "Config failed");
@@ -215,12 +215,11 @@ public class SonioxLiveTranscriber {
                 if (read <= 0) continue;
                 if (!running.get()) break;
 
+                // Decided under bufferLock: a chunk read just before the socket opened
+                // must land in the buffer before the flush, not jump ahead of it.
+                if (enqueueAudioIfNotReady(buffer, read)) continue;
                 WebSocket socket = webSocket;
-                if (wsReady.get() && socket != null) {
-                    sendAudio(socket, buffer, read);
-                } else {
-                    enqueueAudio(buffer, read);
-                }
+                if (socket != null) sendAudio(socket, buffer, read);
             }
         }, "soniox-live-audio");
         audioThread.start();
@@ -232,21 +231,26 @@ public class SonioxLiveTranscriber {
         }
     }
 
-    private void enqueueAudio(byte[] buffer, int length) {
-        byte[] chunk = new byte[length];
-        System.arraycopy(buffer, 0, chunk, 0, length);
+    /** Buffers the chunk while the socket is not ready yet; false means send it now. */
+    private boolean enqueueAudioIfNotReady(byte[] buffer, int length) {
         synchronized (bufferLock) {
+            if (wsReady.get()) return false;
+            byte[] chunk = new byte[length];
+            System.arraycopy(buffer, 0, chunk, 0, length);
             while (bufferedBytes + length > MAX_BUFFER_BYTES && !audioBuffer.isEmpty()) {
                 byte[] dropped = audioBuffer.pollFirst();
                 if (dropped != null) bufferedBytes -= dropped.length;
             }
             audioBuffer.addLast(chunk);
             bufferedBytes += length;
+            return true;
         }
     }
 
     private void flushBufferedAudio(WebSocket socket) {
         synchronized (bufferLock) {
+            // onOpen can run before newWebSocket() has returned and assigned the field.
+            webSocket = socket;
             while (!audioBuffer.isEmpty() && running.get()) {
                 byte[] chunk = audioBuffer.pollFirst();
                 if (chunk == null) break;
@@ -258,6 +262,7 @@ public class SonioxLiveTranscriber {
                     return;
                 }
             }
+            wsReady.set(true);
         }
     }
 
