@@ -1,29 +1,15 @@
 /* Gemini File API — resumable upload session তৈরি করে uploadUrl ফেরত দেয়।
    Browser সেই URL-এ সরাসরি file পাঠায়, Vercel-এর 4.5 MB limit বাইপাস হয়। */
 
-function sendJson(res, status, body) {
-  res.statusCode = status;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.end(JSON.stringify(body));
-}
-
-function setCors(req, res) {
-  const origin = req.headers.origin || '';
-  if (origin) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); }
-}
+const { sendJson, setCorsHeaders, handlePreflight, requireUser } = require('./_auth');
 
 module.exports = async function handler(req, res) {
-  setCors(req, res);
-
-  if (req.method === 'OPTIONS') {
-    res.statusCode = 204;
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.end('');
-    return;
-  }
+  setCorsHeaders(req, res);
+  if (handlePreflight(req, res)) return;
 
   if (req.method !== 'POST') { sendJson(res, 405, { error: 'Method not allowed' }); return; }
+
+  if (!(await requireUser(req, res))) return;
 
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) { sendJson(res, 500, { error: 'Missing GEMINI_API_KEY' }); return; }

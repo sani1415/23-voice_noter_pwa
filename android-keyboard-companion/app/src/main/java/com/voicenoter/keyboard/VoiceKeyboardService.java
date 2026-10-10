@@ -2398,7 +2398,7 @@ public class VoiceKeyboardService extends InputMethodService {
 
     private String trimStatus(String message) {
         if (message == null || message.isEmpty()) return "Live error";
-        return message.length() > 24 ? message.substring(0, 24) : message;
+        return message.length() > 60 ? message.substring(0, 60) : message;
     }
 
     private void startRecording() {
@@ -2546,6 +2546,15 @@ public class VoiceKeyboardService extends InputMethodService {
                 return;
             }
 
+            // The endpoint only serves signed-in users; keep the take until they are.
+            String token = SupabaseAuth.validAccessToken(this);
+            if (token == null) {
+                finishTranscribe(session, file, null, SupabaseAuth.isSignedIn(this)
+                    ? "লগইন যাচাই হয়নি — মাইকে চাপলে আবার চেষ্টা"
+                    : "কিবোর্ড সেটিংসে (⚙) লগইন করুন, তারপর মাইকে চাপুন", true);
+                return;
+            }
+
             String endpoint = getEndpoint() + "/api/transcribe";
             String audio = encodeFile(file);
             JSONObject body = new JSONObject();
@@ -2559,6 +2568,7 @@ public class VoiceKeyboardService extends InputMethodService {
             // A 12-minute take can keep Gemini busy for a while.
             connection.setReadTimeout(240000);
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
             connection.setDoOutput(true);
 
             byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
@@ -2578,6 +2588,10 @@ public class VoiceKeyboardService extends InputMethodService {
                 }
             }
 
+            if (code == 401) {
+                finishTranscribe(session, file, null, "লগইনের মেয়াদ শেষ — কিবোর্ড সেটিংসে (⚙) আবার লগইন করুন", true);
+                return;
+            }
             if (code < 200 || code >= 300) {
                 // Anything but a malformed or oversized request may work on a retry.
                 boolean retryable = code != 400 && code != 413;

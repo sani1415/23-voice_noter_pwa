@@ -1,32 +1,15 @@
-function sendJson(res, statusCode, body) {
-  res.statusCode = statusCode;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.end(JSON.stringify(body));
-}
-
-function setCorsHeaders(req, res) {
-  const origin = req.headers.origin || '';
-  if (origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-  }
-}
+const { sendJson, setCorsHeaders, handlePreflight, requireUser } = require('./_auth');
 
 module.exports = async function handler(req, res) {
   setCorsHeaders(req, res);
-
-  if (req.method === 'OPTIONS') {
-    res.statusCode = 204;
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.end('');
-    return;
-  }
+  if (handlePreflight(req, res)) return;
 
   if (req.method !== 'POST') {
     sendJson(res, 405, { error: 'Method not allowed' });
     return;
   }
+
+  if (!(await requireUser(req, res))) return;
 
   const apiKey = process.env.SONIOX_API_KEY;
   if (!apiKey) {

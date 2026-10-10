@@ -90,6 +90,7 @@ public class MainActivity extends Activity {
         openedFromIme = getIntent() != null && getIntent().getBooleanExtra(EXTRA_FROM_IME, false);
 
         bindSetup();
+        bindAccount();
         bindLanguage();
         bindVoiceMode();
         bindVoiceOnly();
@@ -165,6 +166,61 @@ public class MainActivity extends Activity {
                     Uri.parse("package:" + getPackageName())));
             }
         }
+    }
+
+    // ---------- Account ----------
+
+    private void bindAccount() {
+        EditText email = findViewById(R.id.account_email);
+        EditText password = findViewById(R.id.account_password);
+        Button signIn = findViewById(R.id.btn_sign_in);
+        findViewById(R.id.btn_sign_out).setOnClickListener(v -> {
+            SupabaseAuth.signOut(this);
+            SonioxKeyCache.clear(this);
+            refreshAccountCard();
+        });
+        signIn.setOnClickListener(v -> {
+            String e = email.getText().toString().trim();
+            String p = password.getText().toString();
+            if (e.isEmpty() || p.isEmpty()) {
+                Toast.makeText(this, "ইমেইল আর পাসওয়ার্ড দিন", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            signIn.setEnabled(false);
+            signIn.setText("লগইন হচ্ছে…");
+            new Thread(() -> {
+                String error = null;
+                try {
+                    SupabaseAuth.signIn(this, e, p);
+                } catch (SupabaseAuth.AuthException ex) {
+                    error = ex.getMessage();
+                }
+                final String message = error;
+                runOnUiThread(() -> {
+                    signIn.setEnabled(true);
+                    signIn.setText("লগইন");
+                    if (message != null) {
+                        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    password.setText("");
+                    refreshAccountCard();
+                    Toast.makeText(this, "লগইন হয়েছে", Toast.LENGTH_SHORT).show();
+                });
+            }, "keyboard-sign-in").start();
+        });
+        refreshAccountCard();
+    }
+
+    private void refreshAccountCard() {
+        boolean signedIn = SupabaseAuth.isSignedIn(this);
+        TextView status = findViewById(R.id.account_status);
+        status.setText(signedIn
+            ? "লগইন করা আছে: " + SupabaseAuth.signedInEmail(this)
+            : "ভয়েস দিয়ে লিখতে Voice Notyper-এর অ্যাকাউন্টে লগইন করুন।");
+        status.setTextColor(getColor(signedIn ? R.color.success : R.color.text_muted));
+        findViewById(R.id.account_form).setVisibility(signedIn ? View.GONE : View.VISIBLE);
+        findViewById(R.id.btn_sign_out).setVisibility(signedIn ? View.VISIBLE : View.GONE);
     }
 
     // ---------- Default language ----------

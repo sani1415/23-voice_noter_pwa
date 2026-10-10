@@ -742,6 +742,13 @@ async function exitAppSession() {
   }
 }
 
+/** API (/api/*) এখন লগইন চায়: Supabase session-এর access token সাথে পাঠাও। */
+async function apiAuthHeaders(extra = {}) {
+  const { data } = sb ? await sb.auth.getSession() : { data: null };
+  const token = data?.session?.access_token;
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : extra;
+}
+
 async function initSupabase() {
   try {
     if (!window.supabase?.createClient) throw new Error('supabase-js লোড হয়নি');
@@ -2198,7 +2205,7 @@ async function getSonioxClient() {
   const { SonioxClient } = await loadSonioxClientModule();
   sonioxClient = new SonioxClient({
     config: async () => {
-      const res = await fetch(SONIOX_KEY_ENDPOINT, { method: 'POST' });
+      const res = await fetch(SONIOX_KEY_ENDPOINT, { method: 'POST', headers: await apiAuthHeaders() });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
         throw new Error((e?.error || `HTTP ${res.status}`) + localDevApiHint(res.status));
@@ -2750,7 +2757,7 @@ async function transcribeAndInsert() {
     showProcessing(true, `বিশ্লেষণ হচ্ছে… (${(blob.size/1024).toFixed(0)} KB)`);
 
     const res = await fetch(TRANSCRIBE_ENDPOINT, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: await apiAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         audio: base64,
         mimeType: effectiveMime,
@@ -3458,7 +3465,7 @@ function batchStatusIcon(status) {
 async function batchUploadToGemini(file, mimeType) {
   const sessionRes = await fetch('/api/file-session', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await apiAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ mimeType, size: file.size, displayName: file.name }),
   });
   if (!sessionRes.ok) {
@@ -3491,7 +3498,7 @@ async function batchTranscribeOne(fileEntry) {
 
   const res = await fetch(TRANSCRIBE_ENDPOINT, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await apiAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({
       fileUri,
       mimeType,

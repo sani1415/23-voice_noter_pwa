@@ -109,7 +109,9 @@ public class SonioxLiveTranscriber {
                 String apiKey = apiKeyRef.get();
                 AudioRecord record = recordRef.get();
                 if (apiKey == null || apiKey.isEmpty()) {
-                    fail("Soniox key failed");
+                    fail(SupabaseAuth.isSignedIn(appContext)
+                        ? "Live চালু করা যায়নি, আবার চেষ্টা করুন"
+                        : "কিবোর্ড সেটিংসে (⚙) লগইন করুন");
                     return;
                 }
                 if (record == null) {

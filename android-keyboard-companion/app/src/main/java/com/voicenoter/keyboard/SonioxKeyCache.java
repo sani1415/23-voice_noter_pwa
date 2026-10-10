@@ -65,12 +65,15 @@ public final class SonioxKeyCache {
     }
 
     static String fetchAndCache(Context context, String baseUrl) throws Exception {
-        KeyResult result = fetchTemporaryKey(baseUrl);
+        KeyResult result = fetchTemporaryKey(context, baseUrl);
         save(context, result.apiKey, result.expiresAtIso);
         return result.apiKey;
     }
 
-    static KeyResult fetchTemporaryKey(String baseUrl) throws Exception {
+    static KeyResult fetchTemporaryKey(Context context, String baseUrl) throws Exception {
+        // The endpoint only serves signed-in users (see SupabaseAuth).
+        String token = SupabaseAuth.validAccessToken(context);
+        if (token == null) throw new Exception("not signed in");
         String endpoint = baseUrl;
         while (endpoint.endsWith("/")) endpoint = endpoint.substring(0, endpoint.length() - 1);
         HttpURLConnection connection = (HttpURLConnection) new URL(endpoint + "/api/soniox-key").openConnection();
@@ -78,6 +81,7 @@ public final class SonioxKeyCache {
         connection.setConnectTimeout(15000);
         connection.setReadTimeout(15000);
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+        connection.setRequestProperty("Authorization", "Bearer " + token);
         connection.setDoOutput(true);
         try (OutputStream out = connection.getOutputStream()) {
             out.write("{}".getBytes(StandardCharsets.UTF_8));

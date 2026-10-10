@@ -1,3 +1,5 @@
+const { sendJson, setCorsHeaders, handlePreflight, requireUser } = require('./_auth');
+
 const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const ALLOWED_MODELS = [
   'gemini-2.5-flash',
@@ -97,20 +99,6 @@ function cleanTranscript(text) {
   return value;
 }
 
-function sendJson(res, statusCode, body) {
-  res.statusCode = statusCode;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.end(JSON.stringify(body));
-}
-
-function setCorsHeaders(req, res) {
-  const origin = req.headers.origin || '';
-  if (origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-  }
-}
-
 async function readJsonBody(req) {
   if (req.body && typeof req.body === 'object') return req.body;
   if (typeof req.body === 'string') return JSON.parse(req.body || '{}');
@@ -122,19 +110,14 @@ async function readJsonBody(req) {
 
 module.exports = async function handler(req, res) {
   setCorsHeaders(req, res);
-
-  if (req.method === 'OPTIONS') {
-    res.statusCode = 204;
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.end('');
-    return;
-  }
+  if (handlePreflight(req, res)) return;
 
   if (req.method !== 'POST') {
     sendJson(res, 405, { error: 'Method not allowed' });
     return;
   }
+
+  if (!(await requireUser(req, res))) return;
 
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
