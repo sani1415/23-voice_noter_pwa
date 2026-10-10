@@ -52,6 +52,8 @@ public class SonioxLiveTranscriber {
 
     private Context appContext;
     private volatile WebSocket webSocket;
+    /** Peak of the latest audio chunk, 0…1, for the keyboard's waveform. */
+    private volatile float level = 0f;
     private AudioRecord audioRecord;
     private Thread audioThread;
     private Listener listener;
@@ -129,6 +131,21 @@ public class SonioxLiveTranscriber {
                 fail(e.getMessage() != null ? e.getMessage() : "Live start failed");
             }
         }, "soniox-live-start").start();
+    }
+
+    /** Microphone level of the most recent audio, 0 (silence) … 1 (loud). */
+    public float level() {
+        return running.get() ? level : 0f;
+    }
+
+    /** Peak of 16-bit little-endian PCM, square-rooted so quiet speech still shows. */
+    private static float peakLevel(byte[] pcm, int length) {
+        int peak = 0;
+        for (int i = 0; i + 1 < length; i += 2) {
+            int sample = Math.abs((short) ((pcm[i] & 0xff) | (pcm[i + 1] << 8)));
+            if (sample > peak) peak = sample;
+        }
+        return (float) Math.sqrt(Math.min(1.0, peak / 20000.0));
     }
 
     public void stop() {
@@ -215,6 +232,7 @@ public class SonioxLiveTranscriber {
             while (running.get()) {
                 int read = record.read(buffer, 0, buffer.length);
                 if (read <= 0) continue;
+                level = peakLevel(buffer, read);
                 if (!running.get()) break;
 
                 // Decided under bufferLock: a chunk read just before the socket opened

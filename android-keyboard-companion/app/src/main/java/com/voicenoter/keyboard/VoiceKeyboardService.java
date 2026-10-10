@@ -10,6 +10,9 @@ import android.graphics.PorterDuff;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
+import android.animation.ObjectAnimator;
+import android.animation.ValueAnimator;
 import android.graphics.drawable.StateListDrawable;
 import android.inputmethodservice.InputMethodService;
 import android.media.MediaRecorder;
@@ -56,16 +59,10 @@ import java.util.concurrent.Executors;
 
 public class VoiceKeyboardService extends InputMethodService {
     private static final String MIME_TYPE = "audio/mp4";
-    private static final int UTILITY_KEY_HEIGHT = 28;
-    private static final int STRIP_HEIGHT = 40;
-    private static final int STRIP_ICON_W = 40;   // same on BN / EN / AR
-    private static final int STRIP_MIC_W = 80;    // ~2 bottom letter keys
-    private static final int COLOR_RECORD = 0xff2e7d32;
-    private static final int COLOR_RECORD_SOFT = 0xffe8f5e9;
-    private static final int COLOR_LIVE = 0xffc62828;
-    private static final int COLOR_LIVE_SOFT = 0xffffebee;
-    private static final int COLOR_ACTIVE_TEXT = 0xffffffff;
-    private static final int BTN_CORNER_RADIUS_DP = 8;
+    private static final int TOP_BAR_HEIGHT = 42;
+    private static final int GAP_DP = 6;
+    private static final int KEY_RADIUS_DP = 9;
+    private static final int VOICE_TICK_MS = 70;
     private static final int MAX_PRESETS = 24;
 
     // Sentinel keys used inside letter rows to flip between the main and "more" page,
@@ -74,6 +71,8 @@ public class VoiceKeyboardService extends InputMethodService {
     private static final String TOK_BACK = "\u0001BACK";
     private static final String TOK_DELETE = "\u0001DELETE";
     private static final String TOK_SHIFT = "\u0001SHIFT";
+    private static final String TOK_SPACE = "\u0001SPACE";
+    private static final String TOK_ENTER = "\u0001ENTER";
 
     private static final String[] BN_VOWEL_ROW = {
         "\u0985", "\u0986", "\u0987", "\u0988", "\u0989", "\u098A",
@@ -107,8 +106,6 @@ public class VoiceKeyboardService extends InputMethodService {
     private static final long MIN_AUDIO_BYTES = 4096L;
     /** A recording that could not be transcribed yet; survives keyboard restarts. */
     private static final String PENDING_AUDIO_NAME = "voice-keyboard-pending.m4a";
-    private static final int COLOR_PENDING = 0xffb26a00;
-    private static final int COLOR_PENDING_SOFT = 0xfffff3e0;
 
     // Long-press alternate characters for the roman QWERTY rows (EN + phonetic BN),
     // native Bangla letters, and Arabic letters with related forms.
@@ -142,13 +139,12 @@ public class VoiceKeyboardService extends InputMethodService {
         AR_LONG_PRESS.put("\u0644", new String[]{"\u0644\u0627", "\u0644\u0623", "\u0644\u0625", "\u0644\u0622"});
     }
 
-    // Theme colours, resolved from the selected preset in loadPreferences().
-    private int themeBg = 0xfff7f3ec;
-    private int themeAccent = 0xff2f6f6d;
-    private int themeMuted = 0xff5f6368;
-    private int themeKeyBg = 0xffffffff;
-    private int themeKeyText = 0xff202124;
-    private int themeKeyStroke = 0xffe3ddd0;
+    // Theme colours, resolved from the selected preset in applyTheme().
+    private int themeBg, themeKeyBg, themeKeyText, themeFnBg, themeFnText;
+    private int themeKarBg, themeKarText, themeAccent, themeOnAccent, themeAccentTint, themeAccentStrong;
+    private int themeMuted, themeHint, themeShadow, themeSurface, themeSurfaceAlt, themeLiveIdleBg;
+    private int themeRecTint, themeRec, themeRecText, themePendingTint, themePendingText;
+    private int themeBusyTint, themeBusyText;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -160,16 +156,6 @@ public class VoiceKeyboardService extends InputMethodService {
             mainHandler.postDelayed(this, 55);
         }
     };
-    private final Runnable voiceTimerRunnable = new Runnable() {
-        @Override
-        public void run() {
-            if (isRecording || isLiveActive) {
-                updateMicButtonAppearance();
-                mainHandler.postDelayed(this, 1000);
-            }
-        }
-    };
-
     private MediaRecorder recorder;
     private File audioFile;
     /** Recording kept after a failed or interrupted transcription; mic tap retries it. */
@@ -178,30 +164,39 @@ public class VoiceKeyboardService extends InputMethodService {
     private String pendingTranscript;
     private boolean numericField = false;
     private boolean passwordField = false;
-    private TextView micLabel;
-    private ImageView micModeIcon;
-    private TextView micHoldHint;
-    private ImageButton expandArrowButton;
-    private ImageButton stripPresetButton;
-    private ImageButton stripSettingsButton;
-    private ImageButton morePageIcon;
-    private View stripDeleteKey;
-    private View stripMicKeyWrap;
-    private View utilityMoreKey;
-    private View karToggleKey;
     private LinearLayout bnRow1Layout;
+    // Top bar: one row whose content follows the situation (see refreshTopBar()).
+    private LinearLayout topBar;
+    private LinearLayout toolsGroup, suggestGroup, recordGroup, pendingGroup, numpadGroup;
+    private TextView statusPill, pendingLabel, recordTimer, recordDoneLabel, toolAll, toolKar;
+    private ImageView pendingIcon, recordDoneIcon, micPillIcon;
+    private ImageButton toolPresets, toolSettings, toolCollapse;
+    private FrameLayout toolDelete, recordCancel, presetComposeDelete;
+    private LinearLayout micPill;
+    private TextView micPillLabel;
+    private View micLiveDot, recordDot;
+    private LevelWaveView waveView;
+    private ObjectAnimator recordDotPulse;
+    /** The ▦ button asked for tools instead of suggestions, until the text changes. */
+    private boolean toolsRequested = false;
+    private boolean suggestionsShown = false;
+    private Button moreKey;
+    private TextView rightPunctHint, enterLabel;
+    private ImageView enterIcon;
+    private FrameLayout enterKey;
+    private LinearLayout bottomRowView;
+    /** Preset being edited in the compose row, or -1 when adding a new one. */
+    private int presetEditIndex = -1;
     private LinearLayout keyboardPanel;
     private LinearLayout presetComposeBar;
     private EditText presetComposeInput;
     private LinearLayout letterContainer;
-    private LinearLayout suggestionBar;
     private final TextView[] suggestionViews = new TextView[3];
     // Best suggestion goes to the centre slot, second-best left, third right.
     private static final int[] SUGGESTION_SLOT_ORDER = {1, 0, 2};
     private volatile BanglaDictionary bnDictionary;
     private boolean bnDictionaryLoadStarted = false;
     private Button shiftKeyView;
-    private Button enterKeyButton;
     private Button rightPunctButton;
     private Button spaceKeyButton;
     private final java.util.List<Button> qwertyLetterButtons = new java.util.ArrayList<>();
@@ -240,8 +235,6 @@ public class VoiceKeyboardService extends InputMethodService {
      */
     private final java.util.ArrayDeque<Integer> liveExpectedCarets = new java.util.ArrayDeque<>();
     private boolean voiceOnlyMode = false;
-    private View stripAllKey;
-    private View voiceStrip;
     private String layoutLang = MainActivity.LANG_BN;
     private String voiceInputMode = MainActivity.MODE_RECORD;
     private String bnKarBase = null;
@@ -347,34 +340,6 @@ public class VoiceKeyboardService extends InputMethodService {
         return theme + "|" + enabledRaw + "|" + haptic + "|" + size + "|" + voiceMode;
     }
 
-    private View buildInputView() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(themeBg);
-        root.addView(buildVoiceStrip(), matchWidthWrap());
-        keyboardPanel = buildKeyboardPanel();
-        root.addView(keyboardPanel, matchWidthWrap());
-        applyVoiceOnlyVisibility();
-        applyNavigationBarPadding(root);
-        root.post(this::applyMicStripWidth);
-        return root;
-    }
-
-    private void applyNavigationBarPadding(View root) {
-        root.setOnApplyWindowInsetsListener((view, insets) -> {
-            int bottom = 0;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
-                bottom = bars.bottom;
-            } else {
-                bottom = insets.getSystemWindowInsetBottom();
-            }
-            view.setPadding(view.getPaddingLeft(), view.getPaddingTop(), view.getPaddingRight(), bottom);
-            return insets;
-        });
-        root.requestApplyInsets();
-    }
-
     @Override
     public void onFinishInput() {
         finalizePendingComposing();
@@ -418,270 +383,6 @@ public class VoiceKeyboardService extends InputMethodService {
         }
     }
 
-    private LinearLayout buildVoiceStrip() {
-        LinearLayout strip = new LinearLayout(this);
-        voiceStrip = strip;
-        strip.setOrientation(LinearLayout.HORIZONTAL);
-        strip.setGravity(Gravity.CENTER_VERTICAL);
-        strip.setPadding(dp(4), dp(4), dp(4), dp(4));
-        // Prevent the mic from painting past the screen when the strip is tight.
-        strip.setClipChildren(true);
-        strip.setClipToPadding(true);
-
-        // Fixed-width icons so BN (with ABC/kar) matches EN/AR sizes.
-        stripAllKey = compactActionKey("All", () -> {
-            finalizePendingComposing();
-            selectAllText();
-        });
-        strip.addView(stripAllKey, stripFixedLp(dp(44)));
-
-        ImageButton stripUndoButton = stripIconButton(R.drawable.ic_undo);
-        stripUndoButton.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            undoText();
-        });
-        strip.addView(stripUndoButton, stripFixedLp(dp(STRIP_ICON_W)));
-
-        expandArrowButton = iconButton(R.drawable.ic_arrow_up);
-        expandArrowButton.setPadding(dp(8), dp(8), dp(8), dp(8));
-        expandArrowButton.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            toggleKeyboardPanel();
-        });
-        strip.addView(expandArrowButton, stripFixedLp(dp(STRIP_ICON_W)));
-        updateExpandButtonIcon();
-
-        stripSettingsButton = stripIconButton(R.drawable.ic_settings);
-        stripSettingsButton.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            openKeyboardSettings();
-        });
-        strip.addView(stripSettingsButton, stripFixedLp(dp(STRIP_ICON_W)));
-
-        karToggleKey = compactIconKey(R.drawable.ic_kar_toggle, this::toggleBnVowelRow);
-        karToggleKey.setMinimumHeight(dp(STRIP_HEIGHT));
-        strip.addView(karToggleKey, stripFixedLp(dp(STRIP_ICON_W)));
-
-        stripPresetButton = stripIconButton(R.drawable.ic_presets);
-        stripPresetButton.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            togglePresetPopup(v);
-        });
-        strip.addView(stripPresetButton, stripFixedLp(dp(STRIP_ICON_W)));
-
-        stripDeleteKey = createDeleteKeyView(STRIP_HEIGHT);
-        strip.addView(stripDeleteKey, stripFixedLp(dp(STRIP_ICON_W)));
-
-        View spacer = new View(this);
-        strip.addView(spacer, weighted(STRIP_HEIGHT, 1f));
-
-        stripMicKeyWrap = buildMicKeyView();
-        strip.addView(stripMicKeyWrap, stripFixedLp(dp(STRIP_MIC_W)));
-
-        updateKarToggleVisibility();
-        return strip;
-    }
-
-    private void openKeyboardSettings() {
-        try {
-            Intent intent = new Intent(this, MainActivity.class);
-            // Separate settings task: Back closes settings and returns to the app you were typing in.
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-                | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
-            intent.putExtra(MainActivity.EXTRA_FROM_IME, true);
-            startActivity(intent);
-        } catch (Exception e) {
-            Toast.makeText(this, "Cannot open settings", Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    private LinearLayout.LayoutParams stripFixedLp(int widthPx) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(widthPx, dp(STRIP_HEIGHT));
-        lp.setMargins(dp(2), 0, dp(2), 0);
-        return lp;
-    }
-
-    private View buildMicKeyView() {
-        FrameLayout wrap = new FrameLayout(this);
-        wrap.setMinimumHeight(dp(STRIP_HEIGHT));
-        wrap.setClickable(true);
-        wrap.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            toggleVoiceInput();
-        });
-        wrap.setOnLongClickListener(v -> {
-            if (isRecording || isLiveActive || isTranscribing) return false;
-            if (pendingTranscript != null || pendingAudioFile != null) {
-                performKeyHaptic(v);
-                discardPendingVoice();
-                return true;
-            }
-            finalizePendingComposing();
-            toggleVoiceInputMode();
-            return true;
-        });
-
-        LinearLayout inner = new LinearLayout(this);
-        inner.setOrientation(LinearLayout.VERTICAL);
-        inner.setGravity(Gravity.CENTER);
-        inner.setPadding(dp(3), dp(2), dp(3), dp(1));
-
-        LinearLayout topRow = new LinearLayout(this);
-        topRow.setOrientation(LinearLayout.HORIZONTAL);
-        topRow.setGravity(Gravity.CENTER);
-
-        micModeIcon = new ImageView(this);
-        micModeIcon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(14), dp(14));
-        iconLp.setMargins(0, 0, dp(3), 0);
-        topRow.addView(micModeIcon, iconLp);
-
-        micLabel = new TextView(this);
-        micLabel.setTextSize(12);
-        micLabel.setTypeface(Typeface.DEFAULT_BOLD);
-        micLabel.setSingleLine(true);
-        micLabel.setEllipsize(TextUtils.TruncateAt.END);
-        micLabel.setGravity(Gravity.CENTER);
-        topRow.addView(micLabel, new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ));
-
-        micHoldHint = new TextView(this);
-        micHoldHint.setText("⇄ mode");
-        micHoldHint.setTextSize(8);
-        micHoldHint.setTextColor(themeMuted);
-        micHoldHint.setGravity(Gravity.CENTER);
-        micHoldHint.setSingleLine(true);
-
-        inner.addView(topRow, matchWidthWrap());
-        inner.addView(micHoldHint, matchWidthWrap());
-
-        wrap.addView(inner, new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT
-        ));
-
-        stripMicKeyWrap = wrap;
-        updateMicButtonAppearance();
-        return wrap;
-    }
-
-    private LinearLayout buildKeyboardPanel() {
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(4), 0, dp(4), dp(4));
-
-        presetComposeBar = buildPresetComposeBar();
-        presetComposeBar.setVisibility(View.GONE);
-        panel.addView(presetComposeBar, matchWidthWrap());
-
-        suggestionBar = new LinearLayout(this);
-        suggestionBar.setOrientation(LinearLayout.HORIZONTAL);
-        suggestionBar.setGravity(Gravity.CENTER_VERTICAL);
-        suggestionBar.setPadding(dp(2), dp(2), dp(2), dp(2));
-        suggestionBar.setVisibility(View.GONE);
-        buildSuggestionViews();
-        panel.addView(suggestionBar, matchWidthWrap());
-
-        letterContainer = new LinearLayout(this);
-        letterContainer.setOrientation(LinearLayout.VERTICAL);
-        panel.addView(letterContainer, matchWidthWrap());
-        rebuildLetterRows();
-
-        LinearLayout bottomRow = buildBottomRow();
-        panel.addView(bottomRow, matchWidthWrap());
-        updateKarToggleVisibility();
-        refreshBottomRowForLanguage();
-
-        return panel;
-    }
-
-    private String spaceLanguageLabel(String lang) {
-        if (MainActivity.LANG_EN.equals(lang)) return "English";
-        if (MainActivity.LANG_AR.equals(lang)) return "العربية";
-        return "বাংলা";
-    }
-
-    private void cycleLayoutLanguage() {
-        if (enabledLangs == null || enabledLangs.isEmpty()) return;
-        finalizePendingComposing();
-        int idx = enabledLangs.indexOf(layoutLang);
-        if (idx < 0) idx = 0;
-        String next = enabledLangs.get((idx + 1) % enabledLangs.size());
-        if (next.equals(layoutLang) && enabledLangs.size() <= 1) {
-            return;
-        }
-        setLayoutLanguage(next);
-    }
-
-    private LinearLayout buildBottomRow() {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER);
-        row.setPadding(0, dp(2), 0, 0);
-
-        utilityMoreKey = createMoreKeyView(bottomKeyHeightDp);
-        row.addView(utilityMoreKey, weighted(bottomKeyHeightDp, 0.7f));
-
-        Button leftPunct = actionKey(",", () -> {
-            finalizePendingComposing();
-            commitText(", ");
-        }, bottomKeyHeightDp);
-        row.addView(leftPunct, weighted(bottomKeyHeightDp, 0.5f));
-
-        ImageButton bottomGlobe = iconButton(R.drawable.ic_globe);
-        styleKeyBackground(bottomGlobe, false);
-        bottomGlobe.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            showGlobeMenu(v);
-        });
-        row.addView(bottomGlobe, weighted(bottomKeyHeightDp, 0.55f));
-
-        spaceKeyButton = new Button(this);
-        spaceKeyButton.setText(spaceLanguageLabel(layoutLang));
-        spaceKeyButton.setAllCaps(false);
-        spaceKeyButton.setTextSize(11);
-        spaceKeyButton.setMinWidth(0);
-        spaceKeyButton.setMinHeight(0);
-        spaceKeyButton.setPadding(0, 0, 0, 0);
-        styleKeyButton(spaceKeyButton, false);
-        configureSpaceKey(spaceKeyButton);
-        // Slightly smaller space so globe fits beside it.
-        row.addView(spaceKeyButton, weighted(bottomKeyHeightDp, 2.7f));
-
-        boolean dari = MainActivity.LANG_BN.equals(layoutLang);
-        rightPunctButton = actionKey(dari ? "\u0964" : ".", () -> {
-            finalizePendingComposing();
-            boolean useDari = MainActivity.LANG_BN.equals(layoutLang);
-            commitText(useDari ? "\u0964" : ".");
-        }, bottomKeyHeightDp);
-        rightPunctButton.setOnLongClickListener(v -> {
-            performKeyHaptic(v);
-            showSymbolPopup(v, bottomPunctAltsFor(layoutLang));
-            return true;
-        });
-        row.addView(rightPunctButton, weighted(bottomKeyHeightDp, 0.5f));
-
-        enterKeyButton = new Button(this);
-        enterKeyButton.setAllCaps(false);
-        enterKeyButton.setTextSize(11);
-        enterKeyButton.setMinWidth(0);
-        enterKeyButton.setMinHeight(0);
-        enterKeyButton.setPadding(dp(1), 0, dp(1), 0);
-        styleKeyButton(enterKeyButton, true);
-        enterKeyButton.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            performSmartEnter();
-        });
-        row.addView(enterKeyButton, weighted(bottomKeyHeightDp, 0.85f));
-        refreshEnterKeyLabel();
-
-        return row;
-    }
-
     /** Long-press set of the bottom-row full-stop key: the question mark first. */
     private static String[] bottomPunctAltsFor(String lang) {
         if (MainActivity.LANG_BN.equals(lang)) {
@@ -691,89 +392,6 @@ public class VoiceKeyboardService extends InputMethodService {
             return new String[]{"؟", "!", "،", "؛", ":", ".", "\"", "'", "-", "…"};
         }
         return new String[]{"?", "!", ",", ":", ";", "\"", "'", "-", "@", "…"};
-    }
-
-    private void configureSpaceKey(Button space) {
-        final float[] startX = {0f};
-        final float[] startY = {0f};
-        final boolean[] cursorSwipe = {false};
-        final boolean[] langSwipe = {false};
-        space.setOnTouchListener((v, event) -> {
-            int stepPx = dp(16);
-            int langSwipePx = dp(28);
-            switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    startX[0] = event.getRawX();
-                    startY[0] = event.getRawY();
-                    cursorSwipe[0] = false;
-                    langSwipe[0] = false;
-                    return false;
-                case MotionEvent.ACTION_MOVE: {
-                    float dx = event.getRawX() - startX[0];
-                    float dy = event.getRawY() - startY[0];
-                    // Swipe up on space → cycle language (Gboard-like).
-                    if (!cursorSwipe[0] && !langSwipe[0] && dy < -langSwipePx && Math.abs(dy) > Math.abs(dx)) {
-                        langSwipe[0] = true;
-                        // From here on this listener eats the events, so the Button never
-                        // sees UP and its pending long-press (= switch language) would fire.
-                        v.cancelLongPress();
-                        performKeyHaptic(v);
-                        cycleLayoutLanguage();
-                        return true;
-                    }
-                    if (!langSwipe[0] && Math.abs(dx) >= stepPx && Math.abs(dx) > Math.abs(dy)) {
-                        int steps = (int) (dx / stepPx);
-                        if (!cursorSwipe[0]) v.cancelLongPress();
-                        moveCursorBy(steps);
-                        startX[0] += steps * stepPx;
-                        cursorSwipe[0] = true;
-                        performKeyHaptic(v);
-                        return true;
-                    }
-                    return cursorSwipe[0] || langSwipe[0];
-                }
-                case MotionEvent.ACTION_UP:
-                case MotionEvent.ACTION_CANCEL: {
-                    boolean consumed = cursorSwipe[0] || langSwipe[0];
-                    cursorSwipe[0] = false;
-                    langSwipe[0] = false;
-                    if (consumed) {
-                        // The Button won't get this UP, so clear its pressed look ourselves.
-                        v.setPressed(false);
-                        v.cancelLongPress();
-                    }
-                    return consumed;
-                }
-                default:
-                    return false;
-            }
-        });
-        space.setOnClickListener(v -> handleSpaceTap(v));
-        space.setOnLongClickListener(v -> {
-            performKeyHaptic(v);
-            cycleLayoutLanguage();
-            return true;
-        });
-    }
-
-    private void moveCursorBy(int deltaChars) {
-        if (presetComposeActive && presetComposeInput != null) {
-            int pos = presetComposeInput.getSelectionStart();
-            int newPos = Math.max(0, Math.min(presetComposeInput.getText().length(), pos + deltaChars));
-            presetComposeInput.setSelection(newPos);
-            return;
-        }
-        InputConnection ic = getCurrentInputConnection();
-        if (ic == null) return;
-        ExtractedText et = ic.getExtractedText(new ExtractedTextRequest(), 0);
-        if (et == null || et.text == null) return;
-        int cursor = et.startOffset + et.selectionStart;
-        int newPos = cursor + deltaChars;
-        int min = et.startOffset;
-        int max = et.startOffset + et.text.length();
-        if (newPos < min) newPos = min;
-        if (newPos > max) newPos = max;
-        ic.setSelection(newPos, newPos);
     }
 
     private void handleSpaceTap(View source) {
@@ -807,38 +425,6 @@ public class VoiceKeyboardService extends InputMethodService {
         if (Character.isLetterOrDigit(c)) return true;
         int type = Character.getType(c);
         return type == Character.NON_SPACING_MARK || type == Character.COMBINING_SPACING_MARK;
-    }
-
-    private void rebuildLetterRows() {
-        if (letterContainer == null) return;
-        dismissSymbolPopup();
-        letterContainer.removeAllViews();
-        bnRow1Layout = null;
-        qwertyLetterButtons.clear();
-        shiftKeyView = null;
-        shiftState = 0;
-        boolean qwerty = isRomanQwertyMode() && !morePage;
-        String[][] rows = morePage ? moreRowsFor(layoutLang) : layoutRowsFor(layoutLang);
-        for (int i = 0; i < rows.length; i++) {
-            if (!morePage && i == 0 && bnDynamicRow1Enabled()) {
-                bnRow1Layout = buildDynamicKeyRow(row1Keys(), true, false);
-                letterContainer.addView(bnRow1Layout, matchWidthWrap());
-            } else {
-                addTextRow(letterContainer, rows[i], false, qwerty);
-            }
-        }
-        updateKarToggleVisibility();
-        refreshShiftVisuals();
-        refreshBottomRowForLanguage();
-        updateMoreKeyIcon();
-        syncBnRow1WithText();
-    }
-
-    private void refreshBottomRowForLanguage() {
-        boolean dari = MainActivity.LANG_BN.equals(layoutLang);
-        if (rightPunctButton != null) rightPunctButton.setText(dari ? "\u0964" : ".");
-        if (spaceKeyButton != null) spaceKeyButton.setText(spaceLanguageLabel(layoutLang));
-        updateKarToggleVisibility();
     }
 
     private boolean isRomanQwertyMode() {
@@ -876,21 +462,6 @@ public class VoiceKeyboardService extends InputMethodService {
         bnRow1Layout.removeAllViews();
         populateKeyRow(bnRow1Layout, row1Keys(), true, false);
         updateKarToggleHighlight();
-    }
-
-    private void updateKarToggleVisibility() {
-        if (karToggleKey == null) return;
-        if (voiceOnlyMode) {
-            karToggleKey.setVisibility(View.GONE);
-            return;
-        }
-        karToggleKey.setVisibility(bnDynamicRow1Enabled() ? View.VISIBLE : View.GONE);
-        updateKarToggleHighlight();
-    }
-
-    private void updateKarToggleHighlight() {
-        if (karToggleKey == null || !bnDynamicRow1Enabled()) return;
-        styleKeyBackground(karToggleKey, !bnRow1Vowels);
     }
 
     /**
@@ -967,6 +538,7 @@ public class VoiceKeyboardService extends InputMethodService {
 
     /** Text before the caret changed: refresh everything that reads it. */
     private void onTextContextChanged() {
+        toolsRequested = false;
         refreshSuggestions();
         syncBnRow1WithText();
     }
@@ -991,47 +563,6 @@ public class VoiceKeyboardService extends InputMethodService {
                 mainHandler.post(() -> bnDictionaryLoadStarted = false);
             }
         });
-    }
-
-    private void buildSuggestionViews() {
-        suggestionBar.removeAllViews();
-        for (int i = 0; i < suggestionViews.length; i++) {
-            if (i > 0) {
-                View divider = new View(this);
-                divider.setBackgroundColor(themeKeyStroke);
-                suggestionBar.addView(divider, new LinearLayout.LayoutParams(dp(1), dp(18)));
-            }
-            TextView tv = new TextView(this);
-            tv.setTextSize(15);
-            tv.setTextColor(themeKeyText);
-            if (i == 1) tv.setTypeface(null, Typeface.BOLD);
-            tv.setGravity(Gravity.CENTER);
-            tv.setSingleLine(true);
-            tv.setEllipsize(TextUtils.TruncateAt.END);
-            tv.setPadding(dp(4), 0, dp(4), 0);
-            tv.setOnClickListener(v -> {
-                CharSequence word = ((TextView) v).getText();
-                if (word.length() > 0) {
-                    performKeyHaptic(v);
-                    applySuggestion(word.toString());
-                }
-            });
-            suggestionBar.addView(tv, new LinearLayout.LayoutParams(0, dp(34), 1f));
-            suggestionViews[i] = tv;
-        }
-    }
-
-    private void refreshSuggestions() {
-        if (suggestionBar == null) return;
-        BanglaDictionary dict = bnDictionary;
-        boolean available = dict != null && MainActivity.LANG_BN.equals(layoutLang)
-            && !presetComposeActive && !passwordField;
-        suggestionBar.setVisibility(available ? View.VISIBLE : View.GONE);
-        if (!available) return;
-        java.util.List<String> words = dict.suggest(currentBnPartialWord(), suggestionViews.length);
-        for (int i = 0; i < suggestionViews.length; i++) {
-            suggestionViews[SUGGESTION_SLOT_ORDER[i]].setText(i < words.size() ? words.get(i) : "");
-        }
     }
 
     /** Bengali word fragment immediately before the cursor, or "" when mid-word/selection. */
@@ -1123,42 +654,11 @@ public class VoiceKeyboardService extends InputMethodService {
         return shiftState != 0;
     }
 
-    private Button buildShiftKeyView() {
-        Button b = new Button(this);
-        b.setText(shiftState == 2 ? "\u21EA" : "\u21E7");
-        b.setAllCaps(false);
-        b.setTextSize(16);
-        b.setMinWidth(0);
-        b.setMinHeight(0);
-        b.setPadding(0, 0, 0, 0);
-        styleKeyButton(b, shiftState != 0);
-        b.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            cycleShift();
-        });
-        shiftKeyView = b;
-        return b;
-    }
-
     private void cycleShift() {
         if (shiftState == 0) shiftState = 1;
         else if (shiftState == 1) shiftState = 2;
         else shiftState = 0;
         refreshShiftVisuals();
-    }
-
-    private void refreshShiftVisuals() {
-        if (shiftKeyView != null) {
-            shiftKeyView.setText(shiftState == 2 ? "\u21EA" : "\u21E7");
-            styleKeyButton(shiftKeyView, shiftState != 0);
-        }
-        for (Button b : qwertyLetterButtons) {
-            Object tag = b.getTag();
-            if (tag instanceof String) {
-                String base = (String) tag;
-                b.setText(shiftActive() ? base.toUpperCase(java.util.Locale.US) : base);
-            }
-        }
     }
 
     private String[][] moreRowsFor(String lang) {
@@ -1244,25 +744,6 @@ public class VoiceKeyboardService extends InputMethodService {
     private PopupWindow symbolPopup;
     private PopupWindow presetPopup;
 
-    private void toggleMorePage() {
-        dismissSymbolPopup();
-        dismissPresetPopup();
-        hidePresetCompose();
-        finalizePendingComposing();
-        morePage = !morePage;
-        resetBnKarState();
-        rebuildLetterRows();
-        updateMoreKeyIcon();
-    }
-
-    private void updateMoreKeyIcon() {
-        if (morePageIcon == null) return;
-        morePageIcon.setImageResource(morePage ? R.drawable.ic_chevron_left : R.drawable.ic_chevron_right);
-        if (utilityMoreKey != null) {
-            styleKeyBackground(utilityMoreKey, true);
-        }
-    }
-
     private java.util.List<String> loadPresets() {
         java.util.List<String> list = new java.util.ArrayList<>();
         try {
@@ -1291,630 +772,6 @@ public class VoiceKeyboardService extends InputMethodService {
             .apply();
     }
 
-    private LinearLayout buildPresetComposeBar() {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(2), 0, dp(4));
-
-        presetComposeInput = new EditText(this);
-        presetComposeInput.setHint("Type new preset…");
-        presetComposeInput.setTextSize(13);
-        presetComposeInput.setSingleLine(false);
-        presetComposeInput.setMaxLines(3);
-        presetComposeInput.setMinHeight(dp(34));
-        presetComposeInput.setPadding(dp(8), dp(6), dp(8), dp(6));
-        GradientDrawable inputBg = new GradientDrawable();
-        inputBg.setColor(themeKeyBg);
-        inputBg.setCornerRadius(dp(7));
-        inputBg.setStroke(dp(1), themeAccent);
-        presetComposeInput.setBackground(inputBg);
-        presetComposeInput.setTextColor(themeKeyText);
-        presetComposeInput.setHintTextColor(themeMuted);
-        row.addView(presetComposeInput, weighted(UTILITY_KEY_HEIGHT, 1f));
-
-        Button saveBtn = new Button(this);
-        saveBtn.setText("Save");
-        saveBtn.setAllCaps(false);
-        saveBtn.setTextSize(11);
-        saveBtn.setMinWidth(0);
-        saveBtn.setMinHeight(0);
-        saveBtn.setPadding(dp(6), dp(2), dp(6), dp(2));
-        styleKeyButton(saveBtn, true);
-        saveBtn.setOnClickListener(v -> savePresetCompose());
-        row.addView(saveBtn, weighted(UTILITY_KEY_HEIGHT, 0.42f));
-
-        Button cancelBtn = new Button(this);
-        cancelBtn.setText("✕");
-        cancelBtn.setAllCaps(false);
-        cancelBtn.setTextSize(12);
-        cancelBtn.setMinWidth(0);
-        cancelBtn.setMinHeight(0);
-        cancelBtn.setPadding(dp(4), dp(2), dp(4), dp(2));
-        styleKeyButton(cancelBtn, false);
-        cancelBtn.setOnClickListener(v -> hidePresetCompose());
-        row.addView(cancelBtn, weighted(UTILITY_KEY_HEIGHT, 0.28f));
-        return row;
-    }
-
-    private void showPresetCompose() {
-        finalizePendingComposing();
-        if (voiceOnlyMode) {
-            voiceOnlyMode = false;
-            applyVoiceOnlyVisibility();
-            savePreferences();
-        }
-        if (presetComposeBar == null) return;
-        presetComposeBar.setVisibility(View.VISIBLE);
-        presetComposeActive = true;
-        presetComposeInput.setText("");
-        presetComposeInput.requestFocus();
-        onTextContextChanged();
-    }
-
-    private void hidePresetCompose() {
-        presetComposeActive = false;
-        if (presetComposeBar != null) {
-            presetComposeBar.setVisibility(View.GONE);
-        }
-        if (presetComposeInput != null) {
-            presetComposeInput.setText("");
-        }
-        onTextContextChanged();
-    }
-
-    private void savePresetCompose() {
-        if (presetComposeInput == null) return;
-        String text = presetComposeInput.getText().toString().trim();
-        if (text.isEmpty()) return;
-        java.util.List<String> updated = loadPresets();
-        if (updated.size() >= MAX_PRESETS) return;
-        updated.add(text);
-        savePresets(updated);
-        hidePresetCompose();
-    }
-
-    private void dismissPresetPopup() {
-        if (presetPopup != null && presetPopup.isShowing()) {
-            presetPopup.dismiss();
-        }
-        presetPopup = null;
-    }
-
-    private void togglePresetPopup(View anchor) {
-        if (presetPopup != null && presetPopup.isShowing()) {
-            dismissPresetPopup();
-            return;
-        }
-        finalizePendingComposing();
-        dismissGlobePopup();
-        dismissSymbolPopup();
-        hidePresetCompose();
-        showPresetPopup(anchor);
-    }
-
-    private void showPresetPopup(View anchor) {
-        LinearLayout menu = new LinearLayout(this);
-        menu.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable menuBg = new GradientDrawable();
-        menuBg.setColor(themeKeyBg);
-        menuBg.setCornerRadius(dp(10));
-        menuBg.setStroke(dp(1), themeKeyStroke);
-        menu.setBackground(menuBg);
-        menu.setPadding(dp(8), dp(8), dp(8), dp(8));
-        int menuWidth = dp(260);
-
-        TextView title = new TextView(this);
-        title.setText("Preset messages");
-        title.setTextSize(12);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setTextColor(themeMuted);
-        title.setPadding(dp(4), 0, dp(4), dp(6));
-        menu.addView(title, new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ));
-
-        java.util.List<String> presets = loadPresets();
-        ScrollView scroll = new ScrollView(this);
-        LinearLayout list = new LinearLayout(this);
-        list.setOrientation(LinearLayout.VERTICAL);
-        if (presets.isEmpty()) {
-            TextView empty = new TextView(this);
-            empty.setText("No presets yet");
-            empty.setTextSize(13);
-            empty.setTextColor(themeMuted);
-            empty.setPadding(dp(8), dp(4), dp(8), dp(8));
-            list.addView(empty, matchWidthWrap());
-        } else {
-            for (int i = 0; i < presets.size(); i++) {
-                final int index = i;
-                final String message = presets.get(i);
-                Button item = new Button(this);
-                item.setText(message);
-                item.setAllCaps(false);
-                item.setTextSize(14);
-                item.setMinWidth(0);
-                item.setMinHeight(0);
-                item.setPadding(dp(10), dp(8), dp(10), dp(8));
-                item.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-                item.setSingleLine(true);
-                item.setEllipsize(TextUtils.TruncateAt.END);
-                styleKeyButton(item, false);
-                item.setOnClickListener(v -> {
-                    performKeyHaptic(v);
-                    finalizePendingComposing();
-                    commitText(message);
-                    dismissPresetPopup();
-                });
-                item.setOnLongClickListener(v -> {
-                    java.util.List<String> updated = loadPresets();
-                    if (index >= 0 && index < updated.size()) {
-                        updated.remove(index);
-                        savePresets(updated);
-                        dismissPresetPopup();
-                        showPresetPopup(anchor);
-                    }
-                    return true;
-                });
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                );
-                lp.bottomMargin = dp(4);
-                list.addView(item, lp);
-            }
-        }
-        scroll.addView(list, new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT
-        ));
-        LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(Math.min(180, Math.max(48, presets.size() * 44)))
-        );
-        menu.addView(scroll, scrollLp);
-
-        View divider = new View(this);
-        divider.setBackgroundColor(themeKeyStroke);
-        LinearLayout.LayoutParams divParams = new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(1));
-        divParams.setMargins(0, dp(6), 0, dp(6));
-        menu.addView(divider, divParams);
-
-        Button addBtn = new Button(this);
-        addBtn.setText("+ Add new message");
-        addBtn.setAllCaps(false);
-        addBtn.setTextSize(14);
-        addBtn.setMinWidth(0);
-        addBtn.setMinHeight(0);
-        addBtn.setPadding(dp(10), dp(10), dp(10), dp(10));
-        addBtn.setGravity(Gravity.CENTER);
-        styleKeyButton(addBtn, true);
-        addBtn.setOnClickListener(v -> {
-            dismissPresetPopup();
-            showPresetCompose();
-        });
-        menu.addView(addBtn, new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ));
-
-        menu.measure(
-            View.MeasureSpec.makeMeasureSpec(menuWidth, View.MeasureSpec.EXACTLY),
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-        );
-        int menuHeight = menu.getMeasuredHeight();
-
-        // Not focusable: a focusable popup steals window focus, which makes web views
-        // (Chrome, WebView apps) drop the text field and close the keyboard.
-        presetPopup = new PopupWindow(menu, menuWidth, LinearLayout.LayoutParams.WRAP_CONTENT, false);
-        presetPopup.setElevation(dp(10));
-        presetPopup.setBackgroundDrawable(null);
-        presetPopup.setOutsideTouchable(true);
-        presetPopup.showAsDropDown(anchor, 0, -(anchor.getHeight() + menuHeight + dp(6)));
-    }
-
-    private void showGlobeMenu(View anchor) {
-        finalizePendingComposing();
-        dismissPresetPopup();
-        dismissSymbolPopup();
-        dismissGlobePopup();
-        LinearLayout menu = new LinearLayout(this);
-        menu.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable menuBg = new GradientDrawable();
-        menuBg.setColor(themeKeyBg);
-        menuBg.setCornerRadius(dp(10));
-        menuBg.setStroke(dp(1), themeKeyStroke);
-        menu.setBackground(menuBg);
-        menu.setPadding(dp(8), dp(8), dp(8), dp(8));
-        int menuWidth = dp(216);
-
-        for (String lang : enabledLangs) {
-            Button item = new Button(this);
-            item.setText(languageMenuLabel(lang));
-            item.setAllCaps(false);
-            item.setTextSize(15);
-            item.setMinWidth(0);
-            item.setMinHeight(0);
-            item.setPadding(dp(12), dp(10), dp(12), dp(10));
-            item.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-            styleKeyButton(item, layoutLang.equals(lang));
-            item.setOnClickListener(v -> {
-                setLayoutLanguage(lang);
-                dismissGlobePopup();
-            });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            );
-            lp.bottomMargin = dp(4);
-            menu.addView(item, lp);
-        }
-
-        View divider = new View(this);
-        divider.setBackgroundColor(themeKeyStroke);
-        LinearLayout.LayoutParams divParams = new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(1));
-        divParams.setMargins(0, dp(4), 0, dp(8));
-        menu.addView(divider, divParams);
-
-        Button otherKeyboard = new Button(this);
-        otherKeyboard.setText("Other keyboard…");
-        otherKeyboard.setAllCaps(false);
-        otherKeyboard.setTextSize(14);
-        otherKeyboard.setMinWidth(0);
-        otherKeyboard.setMinHeight(0);
-        otherKeyboard.setPadding(dp(12), dp(10), dp(12), dp(10));
-        otherKeyboard.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-        styleKeyButton(otherKeyboard, false);
-        otherKeyboard.setOnClickListener(v -> {
-            dismissGlobePopup();
-            switchToNextInputMethod(false);
-        });
-        menu.addView(otherKeyboard, new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ));
-
-        menu.measure(
-            View.MeasureSpec.makeMeasureSpec(menuWidth, View.MeasureSpec.EXACTLY),
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-        );
-        int menuHeight = menu.getMeasuredHeight();
-
-        // Not focusable, see presetPopup: switching language must not blur the web page's input.
-        globePopup = new PopupWindow(menu, menuWidth, LinearLayout.LayoutParams.WRAP_CONTENT, false);
-        globePopup.setElevation(dp(10));
-        globePopup.setBackgroundDrawable(null);
-        globePopup.setOutsideTouchable(true);
-        globePopup.showAsDropDown(anchor, 0, -(anchor.getHeight() + menuHeight + dp(6)));
-    }
-
-    private void dismissGlobePopup() {
-        if (globePopup != null && globePopup.isShowing()) {
-            globePopup.dismiss();
-        }
-        globePopup = null;
-    }
-
-    private void dismissSymbolPopup() {
-        if (symbolPopup != null && symbolPopup.isShowing()) {
-            symbolPopup.dismiss();
-        }
-        symbolPopup = null;
-    }
-
-    private void showSymbolPopup(View anchor, String[] symbols) {
-        dismissSymbolPopup();
-        dismissGlobePopup();
-        dismissPresetPopup();
-
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable panelBg = new GradientDrawable();
-        panelBg.setColor(themeKeyBg);
-        panelBg.setCornerRadius(dp(10));
-        panelBg.setStroke(dp(1), themeKeyStroke);
-        panel.setBackground(panelBg);
-        panel.setPadding(dp(6), dp(6), dp(6), dp(6));
-
-        int cols = 5;
-        int cellSize = dp(40);
-        for (int i = 0; i < symbols.length; i += cols) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER);
-            for (int j = i; j < Math.min(i + cols, symbols.length); j++) {
-                String sym = symbols[j];
-                Button btn = new Button(this);
-                btn.setText(sym);
-                btn.setAllCaps(false);
-                btn.setTextSize(16);
-                btn.setMinWidth(0);
-                btn.setMinHeight(0);
-                btn.setPadding(0, 0, 0, 0);
-                styleKeyButton(btn, false);
-                btn.setOnClickListener(v -> {
-                    performKeyHaptic(v);
-                    finalizePendingComposing();
-                    commitText(sym);
-                    dismissSymbolPopup();
-                });
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(cellSize, cellSize);
-                lp.setMargins(dp(2), dp(2), dp(2), dp(2));
-                row.addView(btn, lp);
-            }
-            panel.addView(row, matchWidthWrap());
-        }
-
-        int popupWidth = dp(6 * 2 + cols * 44);
-        panel.measure(
-            View.MeasureSpec.makeMeasureSpec(popupWidth, View.MeasureSpec.EXACTLY),
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-        );
-        int popupHeight = panel.getMeasuredHeight();
-
-        // Not focusable, see presetPopup.
-        symbolPopup = new PopupWindow(panel, popupWidth, LinearLayout.LayoutParams.WRAP_CONTENT, false);
-        symbolPopup.setElevation(dp(10));
-        symbolPopup.setBackgroundDrawable(null);
-        symbolPopup.setOutsideTouchable(true);
-        symbolPopup.showAsDropDown(anchor, 0, -(anchor.getHeight() + popupHeight + dp(8)));
-    }
-
-    private String languageMenuLabel(String lang) {
-        String name = languageLabel(lang);
-        return layoutLang.equals(lang) ? name + "  ✓" : name;
-    }
-
-    private ImageButton iconButton(int drawableRes) {
-        ImageButton button = new ImageButton(this);
-        button.setImageResource(drawableRes);
-        button.setBackgroundColor(0x00000000);
-        button.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        button.setPadding(dp(6), dp(6), dp(6), dp(6));
-        return button;
-    }
-
-    private ImageButton stripIconButton(int drawableRes) {
-        ImageButton button = new ImageButton(this);
-        button.setImageResource(drawableRes);
-        button.setBackgroundColor(0x00000000);
-        button.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        button.setPadding(dp(10), dp(10), dp(10), dp(10));
-        return button;
-    }
-
-    private View compactIconKey(int drawableRes, Runnable action) {
-        FrameLayout wrap = new FrameLayout(this);
-        styleKeyBackground(wrap, false);
-        ImageButton btn = iconButton(drawableRes);
-        btn.setPadding(dp(6), dp(6), dp(6), dp(6));
-        btn.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            action.run();
-        });
-        wrap.addView(btn, matchParentSquare());
-        wrap.setMinimumHeight(dp(STRIP_HEIGHT));
-        return wrap;
-    }
-
-    private Button compactActionKey(String label, Runnable action) {
-        Button button = new Button(this);
-        button.setText(label);
-        button.setAllCaps(false);
-        button.setTextSize(10);
-        button.setMinWidth(0);
-        button.setMinHeight(0);
-        button.setPadding(dp(1), 0, dp(1), 0);
-        styleKeyButton(button, false);
-        button.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            action.run();
-        });
-        return button;
-    }
-
-    private View createMoreKeyView(int heightDp) {
-        FrameLayout wrap = new FrameLayout(this);
-        styleKeyBackground(wrap, true);
-        morePageIcon = iconButton(morePage ? R.drawable.ic_chevron_left : R.drawable.ic_chevron_right);
-        morePageIcon.setPadding(dp(4), dp(4), dp(4), dp(4));
-        morePageIcon.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            toggleMorePage();
-        });
-        morePageIcon.setOnLongClickListener(v -> {
-            if (MainActivity.LANG_BN.equals(layoutLang) && !morePage) {
-                finalizePendingComposing();
-                showSymbolPopup(morePageIcon, BN_DANDA_POPUP_SYMBOLS);
-                return true;
-            }
-            return false;
-        });
-        wrap.addView(morePageIcon, matchParentSquare());
-        wrap.setMinimumHeight(dp(heightDp));
-        return wrap;
-    }
-
-    private View createDeleteKeyView(int heightDp) {
-        FrameLayout wrap = new FrameLayout(this);
-        styleKeyBackground(wrap, false);
-        ImageButton delete = iconButton(R.drawable.ic_close_circle);
-        delete.setPadding(dp(4), dp(4), dp(4), dp(4));
-        configureDeleteButton(delete);
-        wrap.addView(delete, matchParentSquare());
-        wrap.setMinimumHeight(dp(heightDp));
-        return wrap;
-    }
-
-    private Drawable buildKeyBackground(boolean accent) {
-        GradientDrawable normal = new GradientDrawable();
-        normal.setColor(themeKeyBg);
-        normal.setCornerRadius(dp(7));
-        normal.setStroke(dp(1), accent ? themeAccent : themeKeyStroke);
-
-        GradientDrawable pressed = new GradientDrawable();
-        pressed.setColor(darkenColor(themeKeyBg));
-        pressed.setCornerRadius(dp(7));
-        pressed.setStroke(dp(1), accent ? themeAccent : themeKeyStroke);
-
-        StateListDrawable states = new StateListDrawable();
-        states.addState(new int[]{android.R.attr.state_pressed}, pressed);
-        states.addState(new int[]{}, normal);
-        return states;
-    }
-
-    private int darkenColor(int color) {
-        int a = Color.alpha(color);
-        int r = (int) (Color.red(color) * 0.82f);
-        int g = (int) (Color.green(color) * 0.82f);
-        int b = (int) (Color.blue(color) * 0.82f);
-        return Color.argb(a, r, g, b);
-    }
-
-    private void styleKeyBackground(View view, boolean accent) {
-        view.setBackground(buildKeyBackground(accent));
-    }
-
-    private Button actionKey(String label, Runnable action, int heightDp) {
-        Button button = new Button(this);
-        button.setText(label);
-        button.setAllCaps(false);
-        button.setTextSize(12);
-        button.setMinWidth(0);
-        button.setMinHeight(0);
-        button.setPadding(dp(2), 0, dp(2), 0);
-        styleKeyButton(button, false);
-        button.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            action.run();
-        });
-        return button;
-    }
-
-    private void setLayoutLanguage(String lang) {
-        finalizePendingComposing();
-        layoutLang = lang;
-        morePage = false;
-        resetBnKarState();
-        rebuildLetterRows();
-        savePreferences();
-        onTextContextChanged();
-    }
-
-    private void toggleKeyboardPanel() {
-        finalizePendingComposing();
-        voiceOnlyMode = !voiceOnlyMode;
-        applyVoiceOnlyVisibility();
-        savePreferences();
-    }
-
-    private void applyVoiceOnlyVisibility() {
-        if (keyboardPanel != null) {
-            keyboardPanel.setVisibility(voiceOnlyMode ? View.GONE : View.VISIBLE);
-        }
-        // Delete stays on the strip only when the letter keyboard is folded.
-        if (stripDeleteKey != null) {
-            stripDeleteKey.setVisibility(voiceOnlyMode ? View.VISIBLE : View.GONE);
-        }
-        // Kar row is useless without the letter keyboard — free strip width for the mic.
-        if (karToggleKey != null) {
-            if (voiceOnlyMode) {
-                karToggleKey.setVisibility(View.GONE);
-            } else {
-                updateKarToggleVisibility();
-            }
-        }
-        if (voiceOnlyMode) {
-            dismissSymbolPopup();
-            dismissPresetPopup();
-            hidePresetCompose();
-            morePage = false;
-            updateMoreKeyIcon();
-        }
-        updateExpandButtonIcon();
-        applyMicStripWidth();
-    }
-
-    /**
-     * Mic prefers {@link #STRIP_MIC_W}, but when the strip is crowded (voice-only + delete)
-     * shrink it so the button stays fully on-screen instead of overflowing past the right edge.
-     */
-    private void applyMicStripWidth() {
-        if (stripMicKeyWrap == null) return;
-        final View strip = voiceStrip != null ? voiceStrip : (View) stripMicKeyWrap.getParent();
-        if (strip == null) return;
-        Runnable fit = () -> fitMicStripWidth(strip);
-        if (strip.getWidth() > 0) {
-            fit.run();
-        } else {
-            strip.post(fit);
-        }
-    }
-
-    private void fitMicStripWidth(View strip) {
-        android.view.ViewGroup.LayoutParams raw = stripMicKeyWrap.getLayoutParams();
-        if (!(raw instanceof LinearLayout.LayoutParams)) return;
-        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) raw;
-
-        if (stripAllKey != null && !voiceOnlyMode) {
-            stripAllKey.setVisibility(View.VISIBLE);
-        }
-
-        int target = dp(STRIP_MIC_W);
-        if (strip instanceof ViewGroup && strip.getWidth() > 0) {
-            ViewGroup group = (ViewGroup) strip;
-            if (voiceOnlyMode && stripAllKey != null) {
-                stripAllKey.setVisibility(View.VISIBLE);
-            }
-            int available = measureStripSpaceForMic(group, lp);
-            if (voiceOnlyMode && stripAllKey != null && available < dp(STRIP_MIC_W)) {
-                // Prefer a full-size mic over the All shortcut when space is tight.
-                stripAllKey.setVisibility(View.GONE);
-                available = measureStripSpaceForMic(group, lp);
-            }
-            if (available > 0) {
-                target = Math.min(dp(STRIP_MIC_W), Math.max(dp(52), available));
-            }
-        }
-
-        if (lp.width == target && lp.weight == 0f) return;
-        lp.width = target;
-        lp.height = dp(STRIP_HEIGHT);
-        lp.weight = 0f;
-        stripMicKeyWrap.setLayoutParams(lp);
-    }
-
-    private int measureStripSpaceForMic(ViewGroup group, LinearLayout.LayoutParams micLp) {
-        int inner = group.getWidth() - group.getPaddingLeft() - group.getPaddingRight();
-        int used = 0;
-        for (int i = 0; i < group.getChildCount(); i++) {
-            View child = group.getChildAt(i);
-            if (child == stripMicKeyWrap || child.getVisibility() == View.GONE) continue;
-            android.view.ViewGroup.LayoutParams cr = child.getLayoutParams();
-            if (!(cr instanceof LinearLayout.LayoutParams)) continue;
-            LinearLayout.LayoutParams clp = (LinearLayout.LayoutParams) cr;
-            if (clp.weight > 0f) continue;
-            int w = child.getWidth();
-            if (w <= 0) w = clp.width > 0 ? clp.width : 0;
-            used += w + clp.leftMargin + clp.rightMargin;
-        }
-        return inner - used - micLp.leftMargin - micLp.rightMargin;
-    }
-
-    private void updateExpandButtonIcon() {
-        if (expandArrowButton == null) return;
-        expandArrowButton.setImageResource(voiceOnlyMode ? R.drawable.ic_arrow_up : R.drawable.ic_arrow_down);
-    }
-
-    private String languageLabel(String lang) {
-        if (MainActivity.LANG_EN.equals(lang)) return "English";
-        if (MainActivity.LANG_AR.equals(lang)) return "Arabic";
-        return "Bangla";
-    }
-
     @Override
     public void onDestroy() {
         voiceSessionGeneration++;
@@ -1924,7 +781,7 @@ public class VoiceKeyboardService extends InputMethodService {
             if (finished != null) keepAsPendingAudio(finished);
         }
         mainHandler.removeCallbacks(repeatDeleteRunnable);
-        mainHandler.removeCallbacks(voiceTimerRunnable);
+        mainHandler.removeCallbacks(voiceTickRunnable);
         executor.shutdownNow();
         super.onDestroy();
     }
@@ -1938,8 +795,8 @@ public class VoiceKeyboardService extends InputMethodService {
         prefetchSonioxKeyIfNeeded();
         Toast.makeText(this,
             MainActivity.MODE_LIVE.equals(voiceInputMode)
-                ? "Live transcription"
-                : "Record then transcribe",
+                ? "লাইভ মোড: বলার সাথে সাথে লেখা"
+                : "রেকর্ড মোড: বলা শেষে লেখা",
             Toast.LENGTH_SHORT).show();
     }
 
@@ -1973,88 +830,17 @@ public class VoiceKeyboardService extends InputMethodService {
         }
     }
 
-    private void updateMicButtonAppearance() {
-        if (micLabel == null || stripMicKeyWrap == null) return;
-        boolean isLiveMode = MainActivity.MODE_LIVE.equals(voiceInputMode);
-        int accent = isLiveMode ? COLOR_LIVE : COLOR_RECORD;
-        int softBg = isLiveMode ? COLOR_LIVE_SOFT : COLOR_RECORD_SOFT;
-        int iconRes = isLiveMode ? R.drawable.ic_live : R.drawable.ic_mic;
-
-        if (isTranscribing) {
-            applyMicKeyStyle(COLOR_RECORD, COLOR_RECORD, "Transcribing…", R.drawable.ic_mic, true, null);
-        } else if (isLiveConnecting) {
-            applyMicKeyStyle(COLOR_LIVE, COLOR_LIVE, "...", R.drawable.ic_live, true, null);
-        } else if (isLiveActive) {
-            applyMicKeyStyle(COLOR_LIVE, COLOR_LIVE, formatVoiceElapsed(), R.drawable.ic_live, true, null);
-        } else if (isRecording) {
-            applyMicKeyStyle(COLOR_RECORD, COLOR_RECORD, formatVoiceElapsed(), R.drawable.ic_mic, true, null);
-        } else if (pendingTranscript != null) {
-            applyMicKeyStyle(COLOR_PENDING_SOFT, COLOR_PENDING, "বসান", R.drawable.ic_arrow_down, false,
-                "ধরে রাখুন: বাদ");
-        } else if (pendingAudioFile != null) {
-            applyMicKeyStyle(COLOR_PENDING_SOFT, COLOR_PENDING, "আবার", R.drawable.ic_undo, false,
-                "ধরে রাখুন: বাদ");
-        } else {
-            applyMicKeyStyle(softBg, accent, isLiveMode ? "Live" : "Record", iconRes, false, "⇄ mode");
-        }
-    }
-
-    private void applyMicKeyStyle(int bgColor, int accentColor, String label, int iconRes,
-                                  boolean active, String holdHint) {
-        micLabel.setText(label);
-        micModeIcon.setImageResource(iconRes);
-        micModeIcon.setColorFilter(active ? COLOR_ACTIVE_TEXT : accentColor, PorterDuff.Mode.SRC_IN);
-        micLabel.setTextColor(active ? COLOR_ACTIVE_TEXT : themeKeyText);
-        micHoldHint.setVisibility(holdHint != null ? View.VISIBLE : View.GONE);
-        if (holdHint != null) {
-            micHoldHint.setText(holdHint);
-            micHoldHint.setTextColor(themeMuted);
-        }
-
-        GradientDrawable bg = new GradientDrawable();
-        bg.setCornerRadius(dp(BTN_CORNER_RADIUS_DP));
-        bg.setColor(bgColor);
-        if (!active) {
-            bg.setStroke(dp(1), accentColor);
-        }
-        stripMicKeyWrap.setBackground(bg);
-    }
-
-    private String formatVoiceElapsed() {
-        if (voiceActivityStartMs <= 0) return "0:00";
-        long seconds = (System.currentTimeMillis() - voiceActivityStartMs) / 1000;
-        return (seconds / 60) + ":" + String.format("%02d", seconds % 60);
-    }
-
-    private void startVoiceTimer() {
-        voiceActivityStartMs = System.currentTimeMillis();
-        mainHandler.removeCallbacks(voiceTimerRunnable);
-        mainHandler.postDelayed(voiceTimerRunnable, 1000);
-    }
-
-    private void stopVoiceTimer() {
-        voiceActivityStartMs = 0;
-        mainHandler.removeCallbacks(voiceTimerRunnable);
-    }
-
-    private void setRoundedButtonBackground(Button button, int color) {
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(color);
-        background.setCornerRadius(dp(BTN_CORNER_RADIUS_DP));
-        button.setBackground(background);
-    }
-
     private void startLive() {
         if (isLiveActive || isRecording) return;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
             && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            setStatus("Grant mic in app");
+            setStatus("অ্যাপে মাইকের অনুমতি দিন");
             return;
         }
 
         String endpoint = getEndpoint();
         if (endpoint.isEmpty()) {
-            setStatus("Set endpoint in app");
+            setStatus("অ্যাপে সার্ভারের ঠিকানা দিন");
             return;
         }
 
@@ -2397,20 +1183,20 @@ public class VoiceKeyboardService extends InputMethodService {
     }
 
     private String trimStatus(String message) {
-        if (message == null || message.isEmpty()) return "Live error";
+        if (message == null || message.isEmpty()) return "লাইভ চালু করা যায়নি";
         return message.length() > 60 ? message.substring(0, 60) : message;
     }
 
     private void startRecording() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
             && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            setStatus("Grant mic in app");
+            setStatus("অ্যাপে মাইকের অনুমতি দিন");
             return;
         }
 
         String endpoint = getEndpoint();
         if (endpoint.isEmpty()) {
-            setStatus("Set endpoint in app");
+            setStatus("অ্যাপে সার্ভারের ঠিকানা দিন");
             return;
         }
 
@@ -2445,7 +1231,7 @@ public class VoiceKeyboardService extends InputMethodService {
             updateMicButtonAppearance();
         } catch (Exception e) {
             cancelRecordingQuietly();
-            postStatus("Mic error");
+            postStatus("মাইক চালু করা যায়নি");
         }
     }
 
@@ -2861,15 +1647,6 @@ public class VoiceKeyboardService extends InputMethodService {
         });
     }
 
-    private LinearLayout buildDynamicKeyRow(String[] keys, boolean isRow1, boolean qwerty) {
-        LinearLayout keyRow = new LinearLayout(this);
-        keyRow.setOrientation(LinearLayout.HORIZONTAL);
-        keyRow.setGravity(Gravity.CENTER);
-        keyRow.setPadding(0, dp(2), 0, 0);
-        populateKeyRow(keyRow, keys, isRow1, qwerty);
-        return keyRow;
-    }
-
     private String[] longPressAltsFor(String key) {
         if (key == null || key.isEmpty()) return null;
         String[] alts = AR_LONG_PRESS.get(key);
@@ -2888,127 +1665,7 @@ public class VoiceKeyboardService extends InputMethodService {
         });
     }
 
-    /** Tiny top arrow hint so users know the key has long-press variants. */
-    private View decorateLongPressHint(Button button, boolean hasAlts) {
-        if (!hasAlts) return button;
-        FrameLayout wrap = new FrameLayout(this);
-        wrap.addView(button, new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT
-        ));
-        TextView tip = new TextView(this);
-        tip.setText("\u25B4"); // ▴ small up-pointing triangle
-        tip.setTextSize(7);
-        tip.setTextColor(themeMuted);
-        tip.setGravity(Gravity.CENTER);
-        tip.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        FrameLayout.LayoutParams tipLp = new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT
-        );
-        tipLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-        tipLp.topMargin = dp(1);
-        wrap.addView(tip, tipLp);
-        return wrap;
-    }
-
-    private void populateKeyRow(LinearLayout keyRow, String[] keys, boolean isRow1, boolean qwerty) {
-        for (String key : keys) {
-            if (TOK_DELETE.equals(key)) {
-                View deleteKey = createDeleteKeyView(letterKeyHeightDp);
-                keyRow.addView(deleteKey, weighted(letterKeyHeightDp, 1));
-                continue;
-            }
-            if (TOK_BACK.equals(key)) {
-                // Legacy sentinel — page toggle lives on the bottom-left more key.
-                continue;
-            }
-            if (TOK_SHIFT.equals(key)) {
-                keyRow.addView(buildShiftKeyView(), weighted(letterKeyHeightDp, 1f));
-                continue;
-            }
-            Button button = new Button(this);
-            button.setAllCaps(false);
-            button.setMinWidth(0);
-            button.setMinHeight(0);
-            button.setPadding(0, 0, 0, 0);
-            String label = qwerty && shiftActive() ? key.toUpperCase(java.util.Locale.US) : key;
-            button.setText(label);
-            button.setTextSize(15);
-            styleKeyButton(button, false);
-
-            if (qwerty) {
-                button.setTag(key);
-                qwertyLetterButtons.add(button);
-                button.setOnClickListener(v -> {
-                    performKeyHaptic(v);
-                    onQwertyLetterPressed(button);
-                });
-            } else if (",".equals(key)) {
-                button.setOnClickListener(v -> {
-                    performKeyHaptic(v);
-                    finalizePendingComposing();
-                    commitText(", ");
-                });
-            } else if ("\u0964".equals(key)) {
-                button.setOnClickListener(v -> {
-                    performKeyHaptic(v);
-                    finalizePendingComposing();
-                    commitText("\u0964");
-                });
-            } else if (isRow1) {
-                button.setOnClickListener(v -> {
-                    performKeyHaptic(v);
-                    onRow1KeyPressed(key);
-                });
-            } else {
-                button.setOnClickListener(v -> {
-                    performKeyHaptic(v);
-                    onLetterKeyPressed(key);
-                });
-            }
-            String[] alts = longPressAltsFor(key);
-            attachLongPressAlt(button, alts);
-            keyRow.addView(decorateLongPressHint(button, alts != null), weighted(letterKeyHeightDp, 1));
-        }
-    }
-
-    private void addTextRow(LinearLayout root, String[] keys, boolean isRow1, boolean qwerty) {
-        LinearLayout keyRow = buildDynamicKeyRow(keys, isRow1, qwerty);
-        root.addView(keyRow, matchWidthWrap());
-    }
-
-    private void styleKeyButton(Button button, boolean accent) {
-        button.setBackground(buildKeyBackground(accent));
-        button.setTextColor(accent ? themeAccent : themeKeyText);
-    }
-
-    private void performKeyHaptic(View v) {
-        if (v == null || !hapticEnabled) return;
-        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
-    }
-
     // ---------- Smart Enter ----------
-
-    private void refreshEnterKeyLabel() {
-        if (enterKeyButton == null) return;
-        enterKeyButton.setText(smartEnterLabel());
-    }
-
-    private String smartEnterLabel() {
-        if (currentEditorInfo == null) return "Enter";
-        boolean noEnter = (currentEditorInfo.imeOptions & EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0;
-        if (noEnter) return "Enter";
-        int action = currentEditorInfo.imeOptions & EditorInfo.IME_MASK_ACTION;
-        switch (action) {
-            case EditorInfo.IME_ACTION_DONE: return "Done";
-            case EditorInfo.IME_ACTION_SEARCH: return "Search";
-            case EditorInfo.IME_ACTION_GO: return "Go";
-            case EditorInfo.IME_ACTION_SEND: return "Send";
-            case EditorInfo.IME_ACTION_NEXT: return "Next";
-            default: return "Enter";
-        }
-    }
 
     private void performSmartEnter() {
         if (presetComposeActive) {
@@ -3028,6 +1685,1521 @@ public class VoiceKeyboardService extends InputMethodService {
             }
         }
         commitText("\n");
+    }
+
+    // ---------- Layout: tray, top bar, panel ----------
+
+    private View buildInputView() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(themeBg);
+        root.setPadding(dp(4), dp(6), dp(4), dp(10));
+        root.addView(buildTopBar(), matchWidthWrap());
+        keyboardPanel = buildKeyboardPanel();
+        root.addView(keyboardPanel, matchWidthWrap());
+        applyVoiceOnlyVisibility();
+        applyNavigationBarPadding(root);
+        return root;
+    }
+
+    private void applyNavigationBarPadding(View root) {
+        final int basePadBottom = root.getPaddingBottom();
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int bottom;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+                bottom = bars.bottom;
+            } else {
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            view.setPadding(view.getPaddingLeft(), view.getPaddingTop(), view.getPaddingRight(),
+                basePadBottom + bottom);
+            return insets;
+        });
+        root.requestApplyInsets();
+    }
+
+    /**
+     * One 42dp row that changes with the situation: tools or word suggestions next
+     * to the mic, the recording bar, a busy note, a kept recording, or the numpad tag.
+     */
+    private LinearLayout buildTopBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(2), 0, dp(2), dp(6));
+        topBar = bar;
+
+        FrameLayout host = new FrameLayout(this);
+        bar.addView(host, new LinearLayout.LayoutParams(0, dp(TOP_BAR_HEIGHT), 1f));
+        host.addView(buildToolsGroup(), matchParentSquare());
+        host.addView(buildSuggestGroup(), matchParentSquare());
+        host.addView(buildRecordGroup(), matchParentSquare());
+        host.addView(buildStatusPill(), matchParentSquare());
+        host.addView(buildPendingGroup(), matchParentSquare());
+        host.addView(buildNumpadTag(), matchParentSquare());
+
+        micPill = buildMicPill();
+        LinearLayout.LayoutParams micLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, dp(38));
+        micLp.setMarginStart(dp(6));
+        bar.addView(micPill, micLp);
+        refreshTopBar();
+        return bar;
+    }
+
+    private LinearLayout buildToolsGroup() {
+        LinearLayout group = hRow();
+        toolsGroup = group;
+        group.addView(toolIcon(R.drawable.lc_undo, "আগের অবস্থায় ফেরান", this::undoText), toolLp(42));
+        toolAll = toolText("সব", "সব লেখা সিলেক্ট করুন", this::selectAllText);
+        group.addView(toolAll, toolLp(40));
+        toolKar = toolText("কা", "কার-সারি দেখান বা লুকান", this::toggleBnVowelRow);
+        group.addView(toolKar, toolLp(40));
+        toolPresets = toolIcon(R.drawable.lc_message, "প্রিসেট মেসেজ", () -> togglePresetPopup(topBar));
+        group.addView(toolPresets, toolLp(42));
+        toolSettings = toolIcon(R.drawable.lc_sliders, "কিবোর্ড সেটিংস", this::openKeyboardSettings);
+        group.addView(toolSettings, toolLp(42));
+        toolCollapse = toolIcon(R.drawable.lc_chevron_down, "শুধু মাইক রাখুন", this::toggleKeyboardPanel);
+        group.addView(toolCollapse, toolLp(42));
+        toolDelete = new FrameLayout(this);
+        toolDelete.setBackground(keyDrawable(themeKeyBg));
+        toolDelete.setContentDescription("মুছুন");
+        toolDelete.addView(tintedIcon(R.drawable.lc_backspace, themeFnText, 21), centeredLp(22));
+        configureDeleteButton(toolDelete);
+        LinearLayout.LayoutParams delLp = toolLp(44);
+        delLp.setMarginStart(dp(4));
+        group.addView(toolDelete, delLp);
+        return group;
+    }
+
+    private LinearLayout buildSuggestGroup() {
+        LinearLayout group = hRow();
+        suggestGroup = group;
+        ImageButton tools = toolIcon(R.drawable.lc_tools, "টুলবার দেখান", () -> {
+            toolsRequested = true;
+            refreshTopBar();
+        });
+        tools.setBackground(roundRect(withAlpha(themeKeyBg, 0xA6), dp(11)));
+        LinearLayout.LayoutParams toolsLp = toolLp(40);
+        toolsLp.height = dp(38);
+        toolsLp.setMarginEnd(dp(2));
+        group.addView(tools, toolsLp);
+        for (int i = 0; i < suggestionViews.length; i++) {
+            if (i > 0) {
+                View divider = new View(this);
+                divider.setBackgroundColor(withAlpha(themeKeyText, 0x24));
+                group.addView(divider, new LinearLayout.LayoutParams(dp(1), dp(18)));
+            }
+            TextView tv = new TextView(this);
+            tv.setTextSize(17);
+            tv.setTextColor(themeKeyText);
+            tv.setGravity(Gravity.CENTER);
+            tv.setSingleLine(true);
+            tv.setEllipsize(TextUtils.TruncateAt.END);
+            tv.setPadding(dp(4), 0, dp(4), 0);
+            if (i == SUGGESTION_SLOT_ORDER[0]) {
+                tv.setTypeface(null, Typeface.BOLD);
+                tv.setBackground(roundRect(withAlpha(themeKeyBg, 0xA6), dp(10)));
+            }
+            tv.setOnClickListener(v -> {
+                CharSequence word = ((TextView) v).getText();
+                if (word.length() > 0) {
+                    performKeyHaptic(v);
+                    applySuggestion(word.toString());
+                }
+            });
+            group.addView(tv, new LinearLayout.LayoutParams(0, dp(38), 1f));
+            suggestionViews[i] = tv;
+        }
+        return group;
+    }
+
+    private LinearLayout buildRecordGroup() {
+        LinearLayout group = hRow();
+        recordGroup = group;
+
+        recordCancel = new FrameLayout(this);
+        recordCancel.setBackground(keyDrawable(themeKeyBg, dp(19)));
+        recordCancel.setContentDescription("রেকর্ডিং বাতিল");
+        recordCancel.addView(tintedIcon(R.drawable.lc_x, themeMuted, 18), centeredLp(18));
+        recordCancel.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            cancelRecordingByUser();
+        });
+        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(dp(40), dp(40));
+        cancelLp.setMarginEnd(dp(6));
+        group.addView(recordCancel, cancelLp);
+
+        LinearLayout wave = hRow();
+        wave.setBackground(roundRect(themeRecTint, dp(20)));
+        wave.setPadding(dp(14), 0, dp(14), 0);
+        wave.setContentDescription("রেকর্ড চলছে");
+        recordDot = new View(this);
+        recordDot.setBackground(roundRect(themeRec, dp(5)));
+        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(9), dp(9));
+        dotLp.setMarginEnd(dp(10));
+        wave.addView(recordDot, dotLp);
+        waveView = new LevelWaveView(this);
+        waveView.setBarColor(themeRec);
+        wave.addView(waveView, new LinearLayout.LayoutParams(0, dp(24), 1f));
+        recordTimer = new TextView(this);
+        recordTimer.setTextSize(14);
+        recordTimer.setTypeface(Typeface.DEFAULT_BOLD);
+        recordTimer.setTextColor(themeRecText);
+        LinearLayout.LayoutParams timerLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        timerLp.setMarginStart(dp(10));
+        wave.addView(recordTimer, timerLp);
+        group.addView(wave, new LinearLayout.LayoutParams(0, dp(40), 1f));
+
+        LinearLayout done = hRow();
+        done.setBackground(pillDrawable(themeAccent));
+        done.setPadding(dp(12), 0, dp(15), 0);
+        recordDoneIcon = tintedIcon(R.drawable.lc_check, themeOnAccent, 18);
+        done.addView(recordDoneIcon, iconLp(18, 6));
+        recordDoneLabel = new TextView(this);
+        recordDoneLabel.setTextSize(15);
+        recordDoneLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        recordDoneLabel.setTextColor(themeOnAccent);
+        done.addView(recordDoneLabel);
+        done.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            toggleVoiceInput();
+        });
+        LinearLayout.LayoutParams doneLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, dp(40));
+        doneLp.setMarginStart(dp(6));
+        group.addView(done, doneLp);
+        return group;
+    }
+
+    private TextView buildStatusPill() {
+        TextView pill = new TextView(this);
+        statusPill = pill;
+        pill.setGravity(Gravity.CENTER);
+        pill.setTextSize(15);
+        pill.setTypeface(Typeface.DEFAULT_BOLD);
+        pill.setTextColor(themeBusyText);
+        pill.setBackground(roundRect(themeBusyTint, dp(20)));
+        // While Live is still connecting, a tap gives up instead of waiting.
+        pill.setOnClickListener(v -> {
+            if (isLiveConnecting) stopLive();
+        });
+        return pill;
+    }
+
+    private LinearLayout buildPendingGroup() {
+        LinearLayout group = hRow();
+        pendingGroup = group;
+        LinearLayout pill = hRow();
+        pill.setBackground(roundRect(themePendingTint, dp(20)));
+        pill.setPadding(dp(14), 0, dp(14), 0);
+        pendingIcon = tintedIcon(R.drawable.lc_refresh, themePendingText, 17);
+        pill.addView(pendingIcon, iconLp(17, 8));
+        pendingLabel = new TextView(this);
+        pendingLabel.setTextSize(15);
+        pendingLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        pendingLabel.setTextColor(themePendingText);
+        pill.addView(pendingLabel);
+        pill.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            toggleVoiceInput();
+        });
+        group.addView(pill, new LinearLayout.LayoutParams(0, dp(38), 1f));
+        FrameLayout discard = new FrameLayout(this);
+        discard.setBackground(keyDrawable(themeKeyBg, dp(19)));
+        discard.setContentDescription("রেকর্ডিং বাদ দিন");
+        discard.addView(tintedIcon(R.drawable.lc_x, themeMuted, 17), centeredLp(17));
+        discard.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            discardPendingVoice();
+        });
+        LinearLayout.LayoutParams discardLp = new LinearLayout.LayoutParams(dp(38), dp(38));
+        discardLp.setMarginStart(dp(6));
+        group.addView(discard, discardLp);
+        return group;
+    }
+
+    private LinearLayout buildNumpadTag() {
+        LinearLayout group = hRow();
+        numpadGroup = group;
+        group.setPadding(dp(6), 0, dp(4), 0);
+        View dot = new View(this);
+        dot.setBackground(roundRect(themeAccent, dp(4)));
+        group.addView(dot, iconLp(7, 8));
+        TextView tag = new TextView(this);
+        tag.setText("নম্বরের ঘর — ইংরেজি অঙ্ক");
+        tag.setTextSize(13);
+        tag.setTextColor(themeMuted);
+        group.addView(tag, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        TextView letters = new TextView(this);
+        letters.setText("অ আ ক");
+        letters.setTextSize(14);
+        letters.setTypeface(Typeface.DEFAULT_BOLD);
+        letters.setTextColor(themeFnText);
+        letters.setGravity(Gravity.CENTER);
+        letters.setPadding(dp(14), 0, dp(14), 0);
+        letters.setBackground(keyDrawable(themeKeyBg, dp(16)));
+        letters.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            toggleMorePage();
+        });
+        group.addView(letters, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(32)));
+        return group;
+    }
+
+    private LinearLayout buildMicPill() {
+        LinearLayout pill = hRow();
+        pill.setPadding(dp(13), 0, dp(15), 0);
+        micLiveDot = new View(this);
+        micLiveDot.setBackground(roundRect(themeRec, dp(4)));
+        pill.addView(micLiveDot, iconLp(7, 7));
+        micPillIcon = new ImageView(this);
+        pill.addView(micPillIcon, iconLp(18, 7));
+        micPillLabel = new TextView(this);
+        micPillLabel.setTextSize(15);
+        micPillLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        pill.addView(micPillLabel);
+        pill.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            toggleVoiceInput();
+        });
+        pill.setOnLongClickListener(v -> {
+            if (isRecording || isLiveActive || isTranscribing) return false;
+            finalizePendingComposing();
+            performKeyHaptic(v);
+            toggleVoiceInputMode();
+            return true;
+        });
+        return pill;
+    }
+
+    /** Shows the one top-bar state that fits right now. */
+    private void refreshTopBar() {
+        if (topBar == null) return;
+        boolean liveMode = MainActivity.MODE_LIVE.equals(voiceInputMode);
+        boolean numpad = numericField && morePage && !voiceOnlyMode;
+        View show;
+        boolean mic = false;
+        if (isRecording || (isLiveActive && !isLiveConnecting)) {
+            show = recordGroup;
+            recordCancel.setVisibility(isRecording ? View.VISIBLE : View.GONE);
+            recordDoneLabel.setText(isRecording ? "পাঠান" : "থামান");
+            recordDoneIcon.setImageResource(isRecording ? R.drawable.lc_check : R.drawable.lc_stop);
+            recordTimer.setText(formatVoiceElapsed());
+        } else if (isTranscribing || isLiveConnecting) {
+            show = statusPill;
+            statusPill.setText(isTranscribing ? "লেখা তৈরি হচ্ছে…" : "লাইভ চালু হচ্ছে…");
+        } else if (pendingTranscript != null) {
+            show = pendingGroup;
+            pendingLabel.setText("লেখা বসান");
+            pendingIcon.setImageResource(R.drawable.lc_insert);
+        } else if (pendingAudioFile != null) {
+            show = pendingGroup;
+            pendingLabel.setText("আবার পাঠান");
+            pendingIcon.setImageResource(R.drawable.lc_refresh);
+        } else if (numpad) {
+            show = numpadGroup;
+        } else if (suggestionsShown && !toolsRequested && !voiceOnlyMode) {
+            show = suggestGroup;
+            mic = true;
+        } else {
+            show = toolsGroup;
+            mic = true;
+        }
+        for (View v : new View[]{toolsGroup, suggestGroup, recordGroup, statusPill, pendingGroup, numpadGroup}) {
+            v.setVisibility(v == show ? View.VISIBLE : View.GONE);
+        }
+        if (show == toolsGroup) {
+            toolKar.setVisibility(bnDynamicRow1Enabled() && !voiceOnlyMode ? View.VISIBLE : View.GONE);
+            toolSettings.setVisibility(voiceOnlyMode ? View.GONE : View.VISIBLE);
+            toolDelete.setVisibility(voiceOnlyMode ? View.VISIBLE : View.GONE);
+            toolCollapse.setImageResource(voiceOnlyMode ? R.drawable.lc_chevron_up : R.drawable.lc_chevron_down);
+            toolCollapse.setContentDescription(voiceOnlyMode ? "পুরো কিবোর্ড দেখান" : "শুধু মাইক রাখুন");
+            updateKarToggleHighlight();
+        }
+
+        micPill.setVisibility(mic ? View.VISIBLE : View.GONE);
+        if (mic) {
+            micPill.setAlpha(passwordField ? 0.4f : 1f);
+            if (liveMode) {
+                GradientDrawable bg = roundRect(themeLiveIdleBg, dp(19));
+                bg.setStroke(dp(1.5f), themeAccent);
+                micPill.setBackground(bg);
+                micLiveDot.setVisibility(View.VISIBLE);
+                micPillIcon.setVisibility(View.GONE);
+                micPillLabel.setText("লাইভ");
+                micPillLabel.setTextColor(themeAccentStrong);
+                micPill.setContentDescription("লাইভ লেখা শুরু করুন। ধরে রাখলে রেকর্ড মোড।");
+            } else {
+                micPill.setBackground(pillDrawable(themeAccent));
+                micLiveDot.setVisibility(View.GONE);
+                micPillIcon.setVisibility(View.VISIBLE);
+                micPillIcon.setImageResource(R.drawable.lc_mic);
+                micPillIcon.setColorFilter(themeOnAccent, PorterDuff.Mode.SRC_IN);
+                micPillLabel.setText("বলুন");
+                micPillLabel.setTextColor(themeOnAccent);
+                micPill.setContentDescription("ভয়েস দিয়ে লিখুন। ধরে রাখলে লাইভ মোড।");
+            }
+        }
+    }
+
+    /** Kept for the many call sites that just mean "voice state changed". */
+    private void updateMicButtonAppearance() {
+        refreshTopBar();
+    }
+
+    private void openKeyboardSettings() {
+        try {
+            Intent intent = new Intent(this, MainActivity.class);
+            // Separate settings task: Back closes settings and returns to the app you were typing in.
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
+            intent.putExtra(MainActivity.EXTRA_FROM_IME, true);
+            startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(this, "সেটিংস খোলা যায়নি", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private LinearLayout buildKeyboardPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+
+        presetComposeBar = buildPresetComposeBar();
+        presetComposeBar.setVisibility(View.GONE);
+        panel.addView(presetComposeBar, matchWidthWrap());
+
+        letterContainer = new LinearLayout(this);
+        letterContainer.setOrientation(LinearLayout.VERTICAL);
+        panel.addView(letterContainer, matchWidthWrap());
+
+        bottomRowView = buildBottomRow();
+        panel.addView(bottomRowView, matchWidthWrap());
+        rebuildLetterRows();
+        refreshBottomRowForLanguage();
+        return panel;
+    }
+
+    private String spaceLanguageLabel(String lang) {
+        if (MainActivity.LANG_EN.equals(lang)) return "English";
+        if (MainActivity.LANG_AR.equals(lang)) return "العربية";
+        return "বাংলা";
+    }
+
+    /** Next ({@code +1}) or previous ({@code -1}) enabled language. */
+    private void cycleLayoutLanguage(int direction) {
+        if (enabledLangs == null || enabledLangs.size() <= 1) return;
+        finalizePendingComposing();
+        int idx = Math.max(0, enabledLangs.indexOf(layoutLang));
+        int n = enabledLangs.size();
+        setLayoutLanguage(enabledLangs.get(((idx + direction) % n + n) % n));
+    }
+
+    private LinearLayout buildBottomRow() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER);
+        row.setPadding(0, dp(GAP_DP), 0, 0);
+
+        moreKey = fnTextKey("", 13);
+        moreKey.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            toggleMorePage();
+        });
+        moreKey.setOnLongClickListener(v -> {
+            if (MainActivity.LANG_BN.equals(layoutLang) && !morePage) {
+                finalizePendingComposing();
+                showSymbolPopup(v, BN_DANDA_POPUP_SYMBOLS);
+                return true;
+            }
+            return false;
+        });
+        row.addView(moreKey, weighted(bottomKeyHeightDp, 1.3f));
+
+        Button comma = fnTextKey(",", 20);
+        comma.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            finalizePendingComposing();
+            commitText(", ");
+        });
+        row.addView(comma, weighted(bottomKeyHeightDp, 0.8f));
+
+        FrameLayout globe = new FrameLayout(this);
+        globe.setBackground(keyDrawable(themeFnBg));
+        globe.setContentDescription("ভাষা বদলান");
+        globe.addView(tintedIcon(R.drawable.lc_globe, themeFnText, 19), centeredLp(19));
+        globe.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            showGlobeMenu(v);
+        });
+        row.addView(globe, weighted(bottomKeyHeightDp, 0.9f));
+
+        spaceKeyButton = new Button(this);
+        spaceKeyButton.setAllCaps(false);
+        spaceKeyButton.setTextSize(13);
+        spaceKeyButton.setMinWidth(0);
+        spaceKeyButton.setMinHeight(0);
+        spaceKeyButton.setPadding(0, 0, 0, 0);
+        spaceKeyButton.setBackground(keyDrawable(themeKeyBg));
+        spaceKeyButton.setTextColor(themeMuted);
+        spaceKeyButton.setStateListAnimator(null);
+        configureSpaceKey(spaceKeyButton);
+        row.addView(spaceKeyButton, weighted(bottomKeyHeightDp, 4.3f));
+
+        rightPunctButton = fnTextKey("।", 20);
+        rightPunctButton.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            finalizePendingComposing();
+            commitText(MainActivity.LANG_BN.equals(layoutLang) ? "।" : ".");
+        });
+        rightPunctButton.setOnLongClickListener(v -> {
+            performKeyHaptic(v);
+            showSymbolPopup(v, bottomPunctAltsFor(layoutLang));
+            return true;
+        });
+        rightPunctHint = new TextView(this);
+        row.addView(withCornerHint(rightPunctButton, "?", rightPunctHint), weighted(bottomKeyHeightDp, 0.8f));
+
+        enterKey = new FrameLayout(this);
+        enterKey.setBackground(keyDrawable(themeAccent));
+        enterIcon = tintedIcon(R.drawable.lc_enter, themeOnAccent, 20);
+        enterKey.addView(enterIcon, centeredLp(20));
+        enterLabel = new TextView(this);
+        enterLabel.setTextSize(14);
+        enterLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        enterLabel.setTextColor(themeOnAccent);
+        enterLabel.setGravity(Gravity.CENTER);
+        enterKey.addView(enterLabel, matchParentSquare());
+        enterKey.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            performSmartEnter();
+        });
+        row.addView(enterKey, weighted(bottomKeyHeightDp, 1.5f));
+        refreshEnterKeyLabel();
+        return row;
+    }
+
+    /**
+     * Space: tap types a space (double tap: full stop), a sideways swipe switches
+     * language — right for the next, left for the previous — and a long-press does too.
+     */
+    private void configureSpaceKey(Button space) {
+        final float[] startX = {0f};
+        final float[] startY = {0f};
+        final boolean[] swiped = {false};
+        space.setOnTouchListener((v, event) -> {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    startX[0] = event.getRawX();
+                    startY[0] = event.getRawY();
+                    swiped[0] = false;
+                    return false;
+                case MotionEvent.ACTION_MOVE: {
+                    float dx = event.getRawX() - startX[0];
+                    float dy = event.getRawY() - startY[0];
+                    if (!swiped[0] && Math.abs(dx) >= dp(36) && Math.abs(dx) > Math.abs(dy) * 1.5f) {
+                        swiped[0] = true;
+                        // This listener eats the rest of the gesture, so the Button never
+                        // sees UP: cancel its long-press (which also switches language).
+                        v.cancelLongPress();
+                        v.setPressed(false);
+                        performKeyHaptic(v);
+                        cycleLayoutLanguage(dx > 0 ? 1 : -1);
+                    }
+                    return swiped[0];
+                }
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL: {
+                    boolean consumed = swiped[0];
+                    swiped[0] = false;
+                    if (consumed) {
+                        v.setPressed(false);
+                        v.cancelLongPress();
+                    }
+                    return consumed;
+                }
+                default:
+                    return false;
+            }
+        });
+        space.setOnClickListener(v -> handleSpaceTap(v));
+        space.setOnLongClickListener(v -> {
+            performKeyHaptic(v);
+            cycleLayoutLanguage(1);
+            return true;
+        });
+    }
+
+    private void refreshBottomRowForLanguage() {
+        boolean dari = MainActivity.LANG_BN.equals(layoutLang);
+        if (rightPunctButton != null) rightPunctButton.setText(dari ? "।" : ".");
+        if (rightPunctHint != null) {
+            rightPunctHint.setText(MainActivity.LANG_AR.equals(layoutLang) ? "؟" : "?");
+        }
+        if (spaceKeyButton != null) {
+            // The arrows hint that a sideways swipe switches language.
+            String label = enabledLangs != null && enabledLangs.size() > 1
+                ? "‹  " + spaceLanguageLabel(layoutLang) + "  ›"
+                : spaceLanguageLabel(layoutLang);
+            spaceKeyButton.setText(label);
+        }
+        updateMoreKeyLabel();
+        updateKarToggleVisibility();
+    }
+
+    private void updateMoreKeyLabel() {
+        if (moreKey == null) return;
+        String label;
+        if (MainActivity.LANG_EN.equals(layoutLang)) {
+            label = morePage ? "ABC" : "123";
+        } else if (MainActivity.LANG_AR.equals(layoutLang)) {
+            label = morePage ? "أبت" : "١٢٣";
+        } else {
+            label = morePage ? "অআক" : "১২৩";
+        }
+        moreKey.setText(label);
+    }
+
+    // ---------- Number pad (number / phone / date fields) ----------
+
+    private void buildNumpad() {
+        String[][] rows = {
+            {"1", "2", "3", "-"},
+            {"4", "5", "6", "+"},
+            {"7", "8", "9", TOK_DELETE},
+            {".", "0", TOK_SPACE, TOK_ENTER},
+        };
+        for (String[] keys : rows) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setPadding(0, 0, 0, dp(GAP_DP));
+            for (int i = 0; i < keys.length; i++) {
+                String key = keys[i];
+                float weight = i == 3 ? 0.8f : 1f;
+                int height = bottomKeyHeightDp + 8;
+                if (TOK_DELETE.equals(key)) {
+                    row.addView(createDeleteKeyView(), weighted(height, weight));
+                } else if (TOK_SPACE.equals(key)) {
+                    FrameLayout space = new FrameLayout(this);
+                    space.setBackground(keyDrawable(themeFnBg));
+                    space.setContentDescription("স্পেস");
+                    space.addView(tintedIcon(R.drawable.lc_space, themeFnText, 24), centeredLp(24));
+                    space.setOnClickListener(v -> {
+                        performKeyHaptic(v);
+                        commitText(" ");
+                    });
+                    row.addView(space, weighted(height, weight));
+                } else if (TOK_ENTER.equals(key)) {
+                    TextView enter = new TextView(this);
+                    String label = smartEnterLabel();
+                    enter.setText(label != null ? label : "↵");
+                    enter.setTextSize(label != null ? 15 : 20);
+                    enter.setTypeface(Typeface.DEFAULT_BOLD);
+                    enter.setTextColor(themeOnAccent);
+                    enter.setGravity(Gravity.CENTER);
+                    enter.setBackground(keyDrawable(themeAccent));
+                    enter.setOnClickListener(v -> {
+                        performKeyHaptic(v);
+                        performSmartEnter();
+                    });
+                    row.addView(enter, weighted(height, weight));
+                } else {
+                    boolean digit = Character.isDigit(key.charAt(0));
+                    Button b = digit ? letterKey(key, 24) : fnTextKey(key, 22);
+                    b.setOnClickListener(v -> {
+                        performKeyHaptic(v);
+                        commitText(key);
+                    });
+                    String[] alts = "0".equals(key) ? new String[]{"+"}
+                        : ".".equals(key) ? new String[]{",", "*", "#", "/", "(", ")"} : null;
+                    if (alts != null) attachLongPressAlt(b, alts);
+                    row.addView(b, weighted(height, weight));
+                }
+            }
+            letterContainer.addView(row, matchWidthWrap());
+        }
+    }
+
+    // ---------- Presets ----------
+
+    private LinearLayout buildPresetComposeBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(0, 0, 0, dp(GAP_DP));
+
+        presetComposeInput = new EditText(this);
+        presetComposeInput.setHint("নতুন মেসেজ লিখুন…");
+        presetComposeInput.setTextSize(15);
+        presetComposeInput.setSingleLine(false);
+        presetComposeInput.setMaxLines(3);
+        presetComposeInput.setMinHeight(dp(40));
+        presetComposeInput.setPadding(dp(12), dp(8), dp(12), dp(8));
+        GradientDrawable inputBg = roundRect(themeSurface, dp(12));
+        inputBg.setStroke(dp(1.5f), themeAccent);
+        presetComposeInput.setBackground(inputBg);
+        presetComposeInput.setTextColor(themeKeyText);
+        presetComposeInput.setHintTextColor(themeHint);
+        LinearLayout.LayoutParams inputLp = new LinearLayout.LayoutParams(0,
+            LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        inputLp.setMarginEnd(dp(5));
+        bar.addView(presetComposeInput, inputLp);
+
+        TextView save = new TextView(this);
+        save.setText("সেভ");
+        save.setTextSize(15);
+        save.setTypeface(Typeface.DEFAULT_BOLD);
+        save.setTextColor(themeOnAccent);
+        save.setGravity(Gravity.CENTER);
+        save.setPadding(dp(14), 0, dp(14), 0);
+        save.setBackground(keyDrawable(themeAccent));
+        save.setOnClickListener(v -> savePresetCompose());
+        bar.addView(save, composeButtonLp());
+
+        presetComposeDelete = new FrameLayout(this);
+        presetComposeDelete.setBackground(keyDrawable(themeFnBg));
+        presetComposeDelete.setContentDescription("এই মেসেজ মুছুন");
+        presetComposeDelete.addView(tintedIcon(R.drawable.lc_backspace, themeFnText, 18), centeredLp(18));
+        presetComposeDelete.setOnClickListener(v -> deleteEditedPreset());
+        bar.addView(presetComposeDelete, composeIconLp());
+
+        FrameLayout cancel = new FrameLayout(this);
+        cancel.setBackground(keyDrawable(themeFnBg));
+        cancel.setContentDescription("বাতিল");
+        cancel.addView(tintedIcon(R.drawable.lc_x, themeFnText, 18), centeredLp(18));
+        cancel.setOnClickListener(v -> hidePresetCompose());
+        bar.addView(cancel, composeIconLp());
+        return bar;
+    }
+
+    private LinearLayout.LayoutParams composeButtonLp() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, dp(40));
+        lp.setMarginStart(dp(5));
+        return lp;
+    }
+
+    private LinearLayout.LayoutParams composeIconLp() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(40), dp(40));
+        lp.setMarginStart(dp(5));
+        return lp;
+    }
+
+    /** Opens the compose row; {@code editIndex} >= 0 edits that preset, -1 adds one. */
+    private void showPresetCompose(int editIndex, String text) {
+        finalizePendingComposing();
+        if (voiceOnlyMode) {
+            voiceOnlyMode = false;
+            applyVoiceOnlyVisibility();
+            savePreferences();
+        }
+        if (presetComposeBar == null) return;
+        presetEditIndex = editIndex;
+        presetComposeBar.setVisibility(View.VISIBLE);
+        presetComposeDelete.setVisibility(editIndex >= 0 ? View.VISIBLE : View.GONE);
+        presetComposeActive = true;
+        presetComposeInput.setText(text != null ? text : "");
+        presetComposeInput.setSelection(presetComposeInput.getText().length());
+        presetComposeInput.requestFocus();
+        onTextContextChanged();
+    }
+
+    private void hidePresetCompose() {
+        presetComposeActive = false;
+        presetEditIndex = -1;
+        if (presetComposeBar != null) {
+            presetComposeBar.setVisibility(View.GONE);
+        }
+        if (presetComposeInput != null) {
+            presetComposeInput.setText("");
+        }
+        onTextContextChanged();
+    }
+
+    private void savePresetCompose() {
+        if (presetComposeInput == null) return;
+        String text = presetComposeInput.getText().toString().trim();
+        if (text.isEmpty()) return;
+        java.util.List<String> updated = loadPresets();
+        if (presetEditIndex >= 0 && presetEditIndex < updated.size()) {
+            updated.set(presetEditIndex, text);
+        } else {
+            if (updated.size() >= MAX_PRESETS) {
+                setStatus("সর্বোচ্চ " + toBnDigits(String.valueOf(MAX_PRESETS)) + "টা মেসেজ রাখা যায়");
+                return;
+            }
+            updated.add(text);
+        }
+        savePresets(updated);
+        hidePresetCompose();
+        setStatus("সেভ হয়েছে");
+    }
+
+    private void deleteEditedPreset() {
+        java.util.List<String> updated = loadPresets();
+        if (presetEditIndex >= 0 && presetEditIndex < updated.size()) {
+            updated.remove(presetEditIndex);
+            savePresets(updated);
+            setStatus("মুছে ফেলা হয়েছে");
+        }
+        hidePresetCompose();
+    }
+
+    private void dismissPresetPopup() {
+        if (presetPopup != null && presetPopup.isShowing()) {
+            presetPopup.dismiss();
+        }
+        presetPopup = null;
+        if (toolPresets != null) toolPresets.setBackground(null);
+    }
+
+    private void togglePresetPopup(View anchor) {
+        if (presetPopup != null && presetPopup.isShowing()) {
+            dismissPresetPopup();
+            return;
+        }
+        finalizePendingComposing();
+        dismissGlobePopup();
+        dismissSymbolPopup();
+        hidePresetCompose();
+        showPresetPopup(anchor);
+    }
+
+    private void showPresetPopup(View anchor) {
+        java.util.List<String> presets = loadPresets();
+        LinearLayout card = popupCard(dp(12), dp(20));
+        int width = Math.max(dp(260), anchor.getWidth() - dp(16));
+
+        LinearLayout head = hRow();
+        head.setPadding(dp(6), dp(2), dp(6), dp(8));
+        TextView title = new TextView(this);
+        title.setText("প্রিসেট মেসেজ");
+        title.setTextSize(15);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextColor(themeKeyText);
+        head.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        TextView count = new TextView(this);
+        count.setText(toBnDigits(presets.size() + " / " + MAX_PRESETS));
+        count.setTextSize(12);
+        count.setTextColor(themeHint);
+        head.addView(count);
+        card.addView(head, matchWidthWrap());
+
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        if (presets.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("এখনো কোনো মেসেজ নেই। বারবার লেখেন এমন কথা এখানে রেখে দিন।");
+            empty.setTextSize(14);
+            empty.setTextColor(themeMuted);
+            empty.setPadding(dp(8), dp(4), dp(8), dp(10));
+            list.addView(empty, matchWidthWrap());
+        }
+        for (int i = 0; i < presets.size(); i++) {
+            final int index = i;
+            final String message = presets.get(i);
+            LinearLayout item = hRow();
+            item.setBackground(roundRect(themeSurfaceAlt, dp(12)));
+            TextView say = new TextView(this);
+            say.setText(message);
+            say.setTextSize(16);
+            say.setTextColor(themeKeyText);
+            say.setSingleLine(true);
+            say.setEllipsize(TextUtils.TruncateAt.END);
+            say.setGravity(Gravity.CENTER_VERTICAL);
+            say.setPadding(dp(14), 0, dp(6), 0);
+            say.setOnClickListener(v -> {
+                performKeyHaptic(v);
+                finalizePendingComposing();
+                commitText(message);
+                dismissPresetPopup();
+            });
+            item.addView(say, new LinearLayout.LayoutParams(0, dp(46), 1f));
+            ImageButton edit = toolIcon(R.drawable.lc_pencil, "এডিট বা মুছুন", () -> {
+                dismissPresetPopup();
+                showPresetCompose(index, message);
+            });
+            item.addView(edit, new LinearLayout.LayoutParams(dp(42), dp(42)));
+            LinearLayout.LayoutParams lp = matchWidthWrap();
+            lp.bottomMargin = dp(4);
+            list.addView(item, lp);
+        }
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
+        card.addView(scroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+            presets.isEmpty() ? LinearLayout.LayoutParams.WRAP_CONTENT
+                : dp(Math.min(5, presets.size()) * 50)));
+
+        LinearLayout add = hRow();
+        add.setGravity(Gravity.CENTER);
+        add.setBackground(roundRect(themeAccentTint, dp(12)));
+        add.addView(tintedIcon(R.drawable.lc_plus, themeAccentStrong, 18), iconLp(18, 8));
+        TextView addLabel = new TextView(this);
+        addLabel.setText("নতুন মেসেজ যোগ করুন");
+        addLabel.setTextSize(15);
+        addLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        addLabel.setTextColor(themeAccentStrong);
+        add.addView(addLabel);
+        add.setOnClickListener(v -> {
+            dismissPresetPopup();
+            showPresetCompose(-1, null);
+        });
+        LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(46));
+        addLp.topMargin = dp(6);
+        card.addView(add, addLp);
+
+        presetPopup = showAbove(card, anchor, width, dp(8));
+        if (toolPresets != null) toolPresets.setBackground(roundRect(themeAccentTint, dp(12)));
+    }
+
+    // ---------- Menus ----------
+
+    private void showGlobeMenu(View anchor) {
+        finalizePendingComposing();
+        dismissPresetPopup();
+        dismissSymbolPopup();
+        dismissGlobePopup();
+        LinearLayout card = popupCard(dp(8), dp(16));
+        for (String lang : enabledLangs) {
+            boolean current = layoutLang.equals(lang);
+            LinearLayout item = hRow();
+            item.setPadding(dp(14), 0, dp(10), 0);
+            if (current) item.setBackground(roundRect(themeAccentTint, dp(10)));
+            TextView name = new TextView(this);
+            name.setText(spaceLanguageLabel(lang));
+            name.setTextSize(16);
+            name.setTextColor(current ? themeAccentStrong : themeKeyText);
+            if (current) name.setTypeface(Typeface.DEFAULT_BOLD);
+            item.addView(name, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            if (current) item.addView(tintedIcon(R.drawable.lc_check, themeAccentStrong, 18), iconLp(18, 0));
+            item.setOnClickListener(v -> {
+                setLayoutLanguage(lang);
+                dismissGlobePopup();
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
+            lp.bottomMargin = dp(2);
+            card.addView(item, lp);
+        }
+        View divider = new View(this);
+        divider.setBackgroundColor(withAlpha(themeKeyText, 0x1A));
+        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(1));
+        divLp.setMargins(dp(6), dp(4), dp(6), dp(4));
+        card.addView(divider, divLp);
+        TextView other = new TextView(this);
+        other.setText("অন্য কিবোর্ড…");
+        other.setTextSize(15);
+        other.setTextColor(themeMuted);
+        other.setGravity(Gravity.CENTER_VERTICAL);
+        other.setPadding(dp(14), 0, dp(14), 0);
+        other.setOnClickListener(v -> {
+            dismissGlobePopup();
+            switchToNextInputMethod(false);
+        });
+        card.addView(other, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)));
+        globePopup = showAbove(card, anchor, dp(216), 0);
+    }
+
+    private void dismissGlobePopup() {
+        if (globePopup != null && globePopup.isShowing()) {
+            globePopup.dismiss();
+        }
+        globePopup = null;
+    }
+
+    private void dismissSymbolPopup() {
+        if (symbolPopup != null && symbolPopup.isShowing()) {
+            symbolPopup.dismiss();
+        }
+        symbolPopup = null;
+    }
+
+    private void showSymbolPopup(View anchor, String[] symbols) {
+        dismissSymbolPopup();
+        dismissGlobePopup();
+        dismissPresetPopup();
+        int cols = Math.min(5, symbols.length);
+        LinearLayout card = popupCard(dp(6), dp(14));
+        for (int i = 0; i < symbols.length; i += cols) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            for (int j = i; j < Math.min(i + cols, symbols.length); j++) {
+                String sym = symbols[j];
+                Button btn = letterKey(sym, 18);
+                btn.setOnClickListener(v -> {
+                    performKeyHaptic(v);
+                    finalizePendingComposing();
+                    commitText(sym);
+                    dismissSymbolPopup();
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(42), dp(44));
+                lp.setMargins(dp(2), dp(2), dp(2), dp(2));
+                row.addView(btn, lp);
+            }
+            card.addView(row, matchWidthWrap());
+        }
+        symbolPopup = showAbove(card, anchor, dp(12 + cols * 46), dp(6));
+    }
+
+    /** A rounded, shadowed popup card in the theme's surface colour. */
+    private LinearLayout popupCard(int padding, int radius) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(roundRect(themeSurface, radius));
+        card.setPadding(padding, padding, padding, padding);
+        return card;
+    }
+
+    /**
+     * Shows {@code content} just above {@code anchor}. Not focusable: a focusable popup
+     * steals window focus, which makes web views drop the text field and close the keyboard.
+     */
+    private PopupWindow showAbove(View content, View anchor, int width, int xOffset) {
+        content.measure(
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        PopupWindow popup = new PopupWindow(content, width, LinearLayout.LayoutParams.WRAP_CONTENT, false);
+        popup.setElevation(dp(12));
+        popup.setBackgroundDrawable(null);
+        popup.setOutsideTouchable(true);
+        popup.showAsDropDown(anchor, xOffset, -(anchor.getHeight() + content.getMeasuredHeight() + dp(6)));
+        return popup;
+    }
+
+    // ---------- Keys and drawables ----------
+
+    /** A letter key: theme key colour, raised by a 1dp bottom edge. */
+    private Button letterKey(String label, float textSp) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setAllCaps(false);
+        button.setTextSize(textSp);
+        button.setMinWidth(0);
+        button.setMinHeight(0);
+        button.setPadding(0, 0, 0, 0);
+        button.setStateListAnimator(null);
+        button.setBackground(keyDrawable(themeKeyBg));
+        button.setTextColor(themeKeyText);
+        return button;
+    }
+
+    /** A function key (comma, 123, shift…): the darker function-key colour. */
+    private Button fnTextKey(String label, float textSp) {
+        Button button = letterKey(label, textSp);
+        button.setBackground(keyDrawable(themeFnBg));
+        button.setTextColor(themeFnText);
+        return button;
+    }
+
+    private FrameLayout createDeleteKeyView() {
+        FrameLayout wrap = new FrameLayout(this);
+        wrap.setBackground(keyDrawable(themeFnBg));
+        wrap.setContentDescription("মুছুন");
+        wrap.addView(tintedIcon(R.drawable.lc_backspace, themeFnText, 21), centeredLp(22));
+        configureDeleteButton(wrap);
+        return wrap;
+    }
+
+    /** Wraps a key so the first long-press alternative shows in its top corner. */
+    private View withCornerHint(Button button, String hint, TextView hintView) {
+        FrameLayout wrap = new FrameLayout(this);
+        wrap.addView(button, matchParentSquare());
+        TextView tip = hintView != null ? hintView : new TextView(this);
+        tip.setText(hint);
+        tip.setTextSize(9);
+        tip.setTypeface(Typeface.DEFAULT_BOLD);
+        tip.setTextColor(themeHint);
+        tip.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        lp.gravity = Gravity.TOP | Gravity.END;
+        lp.topMargin = dp(2);
+        lp.setMarginEnd(dp(4));
+        wrap.addView(tip, lp);
+        return wrap;
+    }
+
+    private Drawable keyDrawable(int fill) {
+        return keyDrawable(fill, dp(KEY_RADIUS_DP));
+    }
+
+    /** Rounded key with a 1dp darker bottom edge; pressed state shifts the fill. */
+    private Drawable keyDrawable(int fill, int radius) {
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_pressed}, raisedKey(pressedColor(fill), radius));
+        states.addState(new int[]{}, raisedKey(fill, radius));
+        return states;
+    }
+
+    private Drawable raisedKey(int fill, int radius) {
+        LayerDrawable layers = new LayerDrawable(new Drawable[]{
+            roundRect(themeShadow, radius), roundRect(fill, radius)});
+        layers.setLayerInset(1, 0, 0, 0, dp(1));
+        return layers;
+    }
+
+    private Drawable pillDrawable(int fill) {
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_pressed}, roundRect(pressedColor(fill), dp(999)));
+        states.addState(new int[]{}, roundRect(fill, dp(999)));
+        return states;
+    }
+
+    private GradientDrawable roundRect(int color, int radius) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadius(radius);
+        return d;
+    }
+
+    /** Darkens light colours and lightens dark ones, so the press always shows. */
+    private static int pressedColor(int color) {
+        float[] hsv = new float[3];
+        Color.colorToHSV(color, hsv);
+        hsv[2] = hsv[2] > 0.5f ? hsv[2] * 0.86f : Math.min(1f, hsv[2] + 0.12f);
+        return Color.HSVToColor(Color.alpha(color), hsv);
+    }
+
+    private static int withAlpha(int color, int alpha) {
+        return (color & 0x00FFFFFF) | (alpha << 24);
+    }
+
+    private LinearLayout hRow() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        return row;
+    }
+
+    private ImageView tintedIcon(int res, int color, int sizeDp) {
+        ImageView icon = new ImageView(this);
+        icon.setImageResource(res);
+        icon.setColorFilter(color, PorterDuff.Mode.SRC_IN);
+        icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        return icon;
+    }
+
+    private ImageButton toolIcon(int res, String description, Runnable action) {
+        ImageButton button = new ImageButton(this);
+        button.setImageResource(res);
+        button.setColorFilter(themeMuted, PorterDuff.Mode.SRC_IN);
+        button.setBackground(null);
+        button.setScaleType(ImageView.ScaleType.CENTER);
+        button.setContentDescription(description);
+        button.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            action.run();
+        });
+        return button;
+    }
+
+    private TextView toolText(String label, String description, Runnable action) {
+        TextView button = new TextView(this);
+        button.setText(label);
+        button.setTextSize(15);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setTextColor(themeFnText);
+        button.setGravity(Gravity.CENTER);
+        button.setContentDescription(description);
+        button.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            action.run();
+        });
+        return button;
+    }
+
+    private LinearLayout.LayoutParams toolLp(int widthDp) {
+        return new LinearLayout.LayoutParams(dp(widthDp), dp(TOP_BAR_HEIGHT));
+    }
+
+    private FrameLayout.LayoutParams centeredLp(int sizeDp) {
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(sizeDp), dp(sizeDp));
+        lp.gravity = Gravity.CENTER;
+        return lp;
+    }
+
+    private LinearLayout.LayoutParams iconLp(int sizeDp, int marginEndDp) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp));
+        lp.setMarginEnd(dp(marginEndDp));
+        return lp;
+    }
+
+    private static String toBnDigits(String s) {
+        StringBuilder out = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            out.append(c >= '0' && c <= '9' ? (char) ('০' + (c - '0')) : c);
+        }
+        return out.toString();
+    }
+
+    private void setLayoutLanguage(String lang) {
+        finalizePendingComposing();
+        layoutLang = lang;
+        morePage = false;
+        resetBnKarState();
+        rebuildLetterRows();
+        savePreferences();
+        onTextContextChanged();
+    }
+
+    private void toggleKeyboardPanel() {
+        finalizePendingComposing();
+        voiceOnlyMode = !voiceOnlyMode;
+        applyVoiceOnlyVisibility();
+        savePreferences();
+    }
+
+    private void applyVoiceOnlyVisibility() {
+        if (keyboardPanel != null) {
+            keyboardPanel.setVisibility(voiceOnlyMode ? View.GONE : View.VISIBLE);
+        }
+        if (voiceOnlyMode) {
+            dismissSymbolPopup();
+            dismissPresetPopup();
+            hidePresetCompose();
+            morePage = false;
+            updateMoreKeyLabel();
+        }
+        refreshTopBar();
+    }
+
+    private void cancelRecordingByUser() {
+        if (!isRecording) return;
+        cancelRecordingQuietly();
+        setStatus("রেকর্ডিং বাতিল");
+        refreshTopBar();
+    }
+
+    private void rebuildLetterRows() {
+        if (letterContainer == null) return;
+        dismissSymbolPopup();
+        letterContainer.removeAllViews();
+        bnRow1Layout = null;
+        qwertyLetterButtons.clear();
+        shiftKeyView = null;
+        shiftState = 0;
+        boolean numpad = numericField && morePage;
+        if (bottomRowView != null) bottomRowView.setVisibility(numpad ? View.GONE : View.VISIBLE);
+        if (numpad) {
+            buildNumpad();
+        } else {
+            boolean qwerty = isRomanQwertyMode() && !morePage;
+            String[][] rows = morePage ? moreRowsFor(layoutLang) : layoutRowsFor(layoutLang);
+            for (int i = 0; i < rows.length; i++) {
+                if (!morePage && i == 0 && bnDynamicRow1Enabled()) {
+                    bnRow1Layout = buildDynamicKeyRow(row1Keys(), true, false);
+                    letterContainer.addView(bnRow1Layout, matchWidthWrap());
+                } else {
+                    addTextRow(letterContainer, rows[i], false, qwerty);
+                }
+            }
+        }
+        refreshShiftVisuals();
+        refreshBottomRowForLanguage();
+        syncBnRow1WithText();
+        refreshTopBar();
+    }
+
+    private void toggleMorePage() {
+        dismissSymbolPopup();
+        dismissPresetPopup();
+        hidePresetCompose();
+        finalizePendingComposing();
+        morePage = !morePage;
+        resetBnKarState();
+        rebuildLetterRows();
+    }
+
+    private void updateKarToggleVisibility() {
+        refreshTopBar();
+    }
+
+    private void updateKarToggleHighlight() {
+        if (toolKar == null) return;
+        boolean on = bnDynamicRow1Enabled() && !bnRow1Vowels;
+        toolKar.setBackground(on ? roundRect(themeAccentTint, dp(11)) : null);
+        toolKar.setTextColor(on ? themeAccentStrong : themeFnText);
+    }
+
+    private void refreshSuggestions() {
+        BanglaDictionary dict = bnDictionary;
+        boolean available = dict != null && MainActivity.LANG_BN.equals(layoutLang)
+            && !presetComposeActive && !passwordField;
+        java.util.List<String> words = available
+            ? dict.suggest(currentBnPartialWord(), suggestionViews.length)
+            : java.util.Collections.<String>emptyList();
+        for (int i = 0; i < suggestionViews.length; i++) {
+            TextView slot = suggestionViews[SUGGESTION_SLOT_ORDER[i]];
+            if (slot != null) slot.setText(i < words.size() ? words.get(i) : "");
+        }
+        suggestionsShown = !words.isEmpty();
+        refreshTopBar();
+    }
+
+    private Button buildShiftKeyView() {
+        Button b = fnTextKey(shiftState == 2 ? "⇪" : "⇧", 18);
+        b.setContentDescription("শিফট");
+        b.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            cycleShift();
+        });
+        shiftKeyView = b;
+        return b;
+    }
+
+    private void refreshShiftVisuals() {
+        if (shiftKeyView != null) {
+            shiftKeyView.setText(shiftState == 2 ? "⇪" : "⇧");
+            boolean on = shiftState != 0;
+            shiftKeyView.setBackground(keyDrawable(on ? themeAccentTint : themeFnBg));
+            shiftKeyView.setTextColor(on ? themeAccentStrong : themeFnText);
+        }
+        for (Button b : qwertyLetterButtons) {
+            Object tag = b.getTag();
+            if (tag instanceof String) {
+                String base = (String) tag;
+                b.setText(shiftActive() ? base.toUpperCase(java.util.Locale.US) : base);
+            }
+        }
+    }
+
+    private LinearLayout buildDynamicKeyRow(String[] keys, boolean isRow1, boolean qwerty) {
+        LinearLayout keyRow = new LinearLayout(this);
+        keyRow.setOrientation(LinearLayout.HORIZONTAL);
+        keyRow.setGravity(Gravity.CENTER);
+        keyRow.setPadding(0, 0, 0, dp(GAP_DP));
+        populateKeyRow(keyRow, keys, isRow1, qwerty);
+        return keyRow;
+    }
+
+    private void populateKeyRow(LinearLayout keyRow, String[] keys, boolean isRow1, boolean qwerty) {
+        boolean karRow = isRow1 && bnDynamicRow1Enabled() && !bnRow1Vowels;
+        for (String key : keys) {
+            if (TOK_DELETE.equals(key)) {
+                keyRow.addView(createDeleteKeyView(), weighted(letterKeyHeightDp, 1));
+                continue;
+            }
+            if (TOK_BACK.equals(key)) {
+                // Legacy sentinel — page toggle lives on the bottom-left more key.
+                continue;
+            }
+            if (TOK_SHIFT.equals(key)) {
+                keyRow.addView(buildShiftKeyView(), weighted(letterKeyHeightDp, 1f));
+                continue;
+            }
+            String label = qwerty && shiftActive() ? key.toUpperCase(java.util.Locale.US) : key;
+            Button button = letterKey(label, qwerty ? 19 : karRow ? 18 : 20);
+            if (karRow) {
+                button.setBackground(keyDrawable(themeKarBg));
+                button.setTextColor(themeKarText);
+            }
+
+            if (qwerty) {
+                button.setTag(key);
+                qwertyLetterButtons.add(button);
+                button.setOnClickListener(v -> {
+                    performKeyHaptic(v);
+                    onQwertyLetterPressed(button);
+                });
+            } else if (",".equals(key)) {
+                button.setOnClickListener(v -> {
+                    performKeyHaptic(v);
+                    finalizePendingComposing();
+                    commitText(", ");
+                });
+            } else if ("।".equals(key)) {
+                button.setOnClickListener(v -> {
+                    performKeyHaptic(v);
+                    finalizePendingComposing();
+                    commitText("।");
+                });
+            } else if (isRow1) {
+                button.setOnClickListener(v -> {
+                    performKeyHaptic(v);
+                    onRow1KeyPressed(key);
+                });
+            } else {
+                button.setOnClickListener(v -> {
+                    performKeyHaptic(v);
+                    onLetterKeyPressed(key);
+                });
+            }
+            String[] alts = karRow ? null : longPressAltsFor(key);
+            attachLongPressAlt(button, alts);
+            View keyView = alts != null ? withCornerHint(button, alts[0], null) : button;
+            keyRow.addView(keyView, weighted(letterKeyHeightDp, 1));
+        }
+    }
+
+    private void addTextRow(LinearLayout root, String[] keys, boolean isRow1, boolean qwerty) {
+        LinearLayout keyRow = buildDynamicKeyRow(keys, isRow1, qwerty);
+        root.addView(keyRow, matchWidthWrap());
+    }
+
+    private void performKeyHaptic(View v) {
+        if (v == null || !hapticEnabled) return;
+        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+    }
+
+    // ---------- Smart Enter ----------
+
+    private void refreshEnterKeyLabel() {
+        if (enterKey == null) return;
+        String label = smartEnterLabel();
+        enterLabel.setText(label != null ? label : "");
+        enterLabel.setVisibility(label != null ? View.VISIBLE : View.GONE);
+        enterIcon.setVisibility(label != null ? View.GONE : View.VISIBLE);
+        enterKey.setContentDescription(label != null ? label : "নতুন লাইন");
+    }
+
+    /** The field's action word in Bangla, or null for a plain new line (shown as an icon). */
+    private String smartEnterLabel() {
+        if (currentEditorInfo == null) return null;
+        boolean noEnter = (currentEditorInfo.imeOptions & EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0;
+        if (noEnter) return null;
+        int action = currentEditorInfo.imeOptions & EditorInfo.IME_MASK_ACTION;
+        switch (action) {
+            case EditorInfo.IME_ACTION_DONE: return "সম্পন্ন";
+            case EditorInfo.IME_ACTION_SEARCH: return "খুঁজুন";
+            case EditorInfo.IME_ACTION_GO: return "যান";
+            case EditorInfo.IME_ACTION_SEND: return "পাঠান";
+            case EditorInfo.IME_ACTION_NEXT: return "পরবর্তী";
+            default: return null;
+        }
+    }
+
+    // ---------- Voice timer and level ----------
+
+    /** Ticks while recording or live: feeds the waveform and updates the timer. */
+    private final Runnable voiceTickRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!isRecording && !isLiveActive) return;
+            float level = 0f;
+            if (isRecording && recorder != null) {
+                try {
+                    level = (float) Math.sqrt(Math.min(1.0, recorder.getMaxAmplitude() / 18000.0));
+                } catch (RuntimeException ignored) {
+                }
+            } else if (liveTranscriber != null) {
+                level = liveTranscriber.level();
+            }
+            if (waveView != null) waveView.push(level);
+            if (recordTimer != null) recordTimer.setText(formatVoiceElapsed());
+            mainHandler.postDelayed(this, VOICE_TICK_MS);
+        }
+    };
+
+    private String formatVoiceElapsed() {
+        long seconds = voiceActivityStartMs <= 0 ? 0
+            : (System.currentTimeMillis() - voiceActivityStartMs) / 1000;
+        return toBnDigits((seconds / 60) + ":" + String.format(java.util.Locale.US, "%02d", seconds % 60));
+    }
+
+    private void startVoiceTimer() {
+        voiceActivityStartMs = System.currentTimeMillis();
+        if (waveView != null) waveView.clear();
+        mainHandler.removeCallbacks(voiceTickRunnable);
+        mainHandler.post(voiceTickRunnable);
+        startRecordDotPulse();
+    }
+
+    private void stopVoiceTimer() {
+        voiceActivityStartMs = 0;
+        mainHandler.removeCallbacks(voiceTickRunnable);
+        if (recordDotPulse != null) {
+            recordDotPulse.cancel();
+            recordDotPulse = null;
+        }
+        if (recordDot != null) recordDot.setAlpha(1f);
+    }
+
+    private void startRecordDotPulse() {
+        if (recordDot == null) return;
+        if (recordDotPulse != null) recordDotPulse.cancel();
+        // Follows the system animation scale, so "remove animations" stills it.
+        recordDotPulse = ObjectAnimator.ofFloat(recordDot, View.ALPHA, 1f, 0.35f);
+        recordDotPulse.setDuration(650);
+        recordDotPulse.setRepeatCount(ValueAnimator.INFINITE);
+        recordDotPulse.setRepeatMode(ValueAnimator.REVERSE);
+        recordDotPulse.start();
+    }
+
+    // ---------- Theme ----------
+
+    private void applyKeySize(String size) {
+        if (MainActivity.SIZE_SMALL.equals(size)) {
+            letterKeyHeightDp = 36;
+            bottomKeyHeightDp = 38;
+        } else if (MainActivity.SIZE_LARGE.equals(size)) {
+            letterKeyHeightDp = 46;
+            bottomKeyHeightDp = 48;
+        } else {
+            letterKeyHeightDp = 40;
+            bottomKeyHeightDp = 42;
+        }
+    }
+
+    /**
+     * Palettes. Each sets the tray, letter keys, function keys, the kar row, one
+     * accent (mic, enter) and the soft tints the recording / pending bars use.
+     */
+    private void applyTheme(String theme) {
+        // Shared light-theme status tints.
+        themeRecTint = 0xffF5E2DC; themeRec = 0xffC9543F; themeRecText = 0xff8E2F20;
+        themePendingTint = 0xffFBEBCB; themePendingText = 0xff6B4600;
+        if (MainActivity.THEME_DARK.equals(theme)) {
+            themeBg = 0xff1C1E1B; themeKeyBg = 0xff2E312C; themeKeyText = 0xffECEDE8;
+            themeFnBg = 0xff40443D; themeFnText = 0xffD5D7D0;
+            themeKarBg = 0xff2B3A2E; themeKarText = 0xffB9D6BE;
+            themeAccent = 0xff9DC3A3; themeOnAccent = 0xff10261A;
+            themeAccentTint = 0xff2B3A2E; themeAccentStrong = 0xffB9D6BE;
+            themeMuted = 0xffB4B7AF; themeHint = 0xff9A9D95; themeShadow = 0x73000000;
+            themeSurface = 0xff2A2D29; themeSurfaceAlt = 0xff33362F; themeLiveIdleBg = 0xff2E312C;
+            themeRecTint = 0xff4A2A24; themeRec = 0xffE07A64; themeRecText = 0xffF2B5A8;
+            themePendingTint = 0xff4A3A1A; themePendingText = 0xffF2D08A;
+        } else if (MainActivity.THEME_LIGHT.equals(theme)) {
+            themeBg = 0xffECEFF1; themeKeyBg = 0xffFFFFFF; themeKeyText = 0xff202124;
+            themeFnBg = 0xffD5DADF; themeFnText = 0xff3C4043;
+            themeKarBg = 0xffE3ECF7; themeKarText = 0xff1A4F8B;
+            themeAccent = 0xff1A73E8; themeOnAccent = 0xffFFFFFF;
+            themeAccentTint = 0xffDCE8FB; themeAccentStrong = 0xff174EA6;
+            themeMuted = 0xff5F6368; themeHint = 0xff80868B; themeShadow = 0x26202124;
+            themeSurface = 0xffFFFFFF; themeSurfaceAlt = 0xffF1F3F4; themeLiveIdleBg = 0xffFFFFFF;
+        } else if (MainActivity.THEME_COLORFUL.equals(theme)) {
+            themeBg = 0xff15203A; themeKeyBg = 0xff243056; themeKeyText = 0xffFFFFFF;
+            themeFnBg = 0xff33416B; themeFnText = 0xffDDE3F5;
+            themeKarBg = 0xff3D3420; themeKarText = 0xffFFD580;
+            themeAccent = 0xffFFB300; themeOnAccent = 0xff1A1300;
+            themeAccentTint = 0xff3D3420; themeAccentStrong = 0xffFFD580;
+            themeMuted = 0xffB9C2DD; themeHint = 0xff8F9AC0; themeShadow = 0x66000000;
+            themeSurface = 0xff243056; themeSurfaceAlt = 0xff2C3963; themeLiveIdleBg = 0xff243056;
+            themeRecTint = 0xff4A2A30; themeRec = 0xffFF8A7A; themeRecText = 0xffFFC2B8;
+            themePendingTint = 0xff4A3A1A; themePendingText = 0xffFFD580;
+        } else { // warm (default): sage on paper
+            themeBg = 0xffE9E8E1; themeKeyBg = 0xffFFFFFF; themeKeyText = 0xff1E1F24;
+            themeFnBg = 0xffD9D8CF; themeFnText = 0xff3B3E45;
+            themeKarBg = 0xffE1ECDE; themeKarText = 0xff244A2F;
+            themeAccent = 0xff3F6B4A; themeOnAccent = 0xffFFFFFF;
+            themeAccentTint = 0xffDDE9DB; themeAccentStrong = 0xff2F5338;
+            themeMuted = 0xff5B5E66; themeHint = 0xff7C7F86; themeShadow = 0x261E1F24;
+            themeSurface = 0xffFFFFFF; themeSurfaceAlt = 0xffF4F3EE; themeLiveIdleBg = 0xffFFFFFF;
+        }
+        themeBusyTint = themeAccentTint;
+        themeBusyText = themeAccentStrong;
+    }
+
+    private int dp(float value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
     private FrameLayout.LayoutParams matchParentSquare() {
@@ -3085,35 +3257,6 @@ public class VoiceKeyboardService extends InputMethodService {
         appliedConfigSig = configSignature(
             themePref, enabledRaw, hapticEnabled, sizePref, voiceInputMode
         );
-    }
-
-    private void applyKeySize(String size) {
-        if (MainActivity.SIZE_SMALL.equals(size)) {
-            letterKeyHeightDp = 34;
-            bottomKeyHeightDp = 42;
-        } else if (MainActivity.SIZE_LARGE.equals(size)) {
-            letterKeyHeightDp = 50;
-            bottomKeyHeightDp = 56;
-        } else {
-            letterKeyHeightDp = 42;
-            bottomKeyHeightDp = 50;
-        }
-    }
-
-    private void applyTheme(String theme) {
-        if (MainActivity.THEME_DARK.equals(theme)) {
-            themeBg = 0xff1c1c1e; themeAccent = 0xff4db6ac; themeMuted = 0xffaeaeb2;
-            themeKeyBg = 0xff2c2c2e; themeKeyText = 0xfff5f5f5; themeKeyStroke = 0xff3a3a3c;
-        } else if (MainActivity.THEME_LIGHT.equals(theme)) {
-            themeBg = 0xffeceff1; themeAccent = 0xff1a73e8; themeMuted = 0xff5f6368;
-            themeKeyBg = 0xffffffff; themeKeyText = 0xff202124; themeKeyStroke = 0xffd0d4d8;
-        } else if (MainActivity.THEME_COLORFUL.equals(theme)) {
-            themeBg = 0xff15203a; themeAccent = 0xffffb300; themeMuted = 0xffb9c2dd;
-            themeKeyBg = 0xff243056; themeKeyText = 0xffffffff; themeKeyStroke = 0xff3a4a78;
-        } else { // warm (default)
-            themeBg = 0xfff7f3ec; themeAccent = 0xff2f6f6d; themeMuted = 0xff5f6368;
-            themeKeyBg = 0xffffffff; themeKeyText = 0xff202124; themeKeyStroke = 0xffe3ddd0;
-        }
     }
 
     private java.util.List<String> parseEnabledLangs(String raw) {
