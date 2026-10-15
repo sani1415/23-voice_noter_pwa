@@ -173,6 +173,9 @@ public class VoiceKeyboardService extends InputMethodService {
     private ImageButton toolPresets, toolSettings, toolCollapse;
     private FrameLayout toolDelete, recordCancel, presetComposeDelete;
     private LinearLayout micPill;
+    private LinearLayout voiceNotice;
+    private TextView voiceNoticeText, voiceNoticeAction;
+    private boolean voiceNoticeNeedsLogin;
     private TextView micPillLabel;
     private View micLiveDot, recordDot;
     private LevelWaveView waveView;
@@ -292,6 +295,11 @@ public class VoiceKeyboardService extends InputMethodService {
         prefetchSonioxKeyIfNeeded();
         loadBnDictionaryIfNeeded();
         onTextContextChanged();
+        if (!SupabaseAuth.isSignedIn(this) && !passwordField) {
+            showVoiceNotice("ভয়েস দিয়ে লিখতে লগইন করুন।", true);
+        } else if (voiceNoticeNeedsLogin) {
+            clearVoiceNotice();
+        }
     }
 
     private static boolean isNumericInputType(int inputType) {
@@ -832,6 +840,13 @@ public class VoiceKeyboardService extends InputMethodService {
 
     private void startLive() {
         if (isLiveActive || isRecording) return;
+        if (!SupabaseAuth.isSignedIn(this)) {
+            if (VoiceDiagnostics.summary(this).isEmpty()) {
+                VoiceDiagnostics.record(this, "soniox_key", "auth_required", 0);
+            }
+            showVoiceNotice("ভয়েস দিয়ে লিখতে আবার লগইন করুন।", true);
+            return;
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
             && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             setStatus("অ্যাপে মাইকের অনুমতি দিন");
@@ -844,6 +859,7 @@ public class VoiceKeyboardService extends InputMethodService {
             return;
         }
 
+        clearVoiceNotice();
         isLiveActive = true;
         isLiveConnecting = true;
         beginLiveAnchor();
@@ -888,13 +904,15 @@ public class VoiceKeyboardService extends InputMethodService {
             public void onError(String message) {
                 if (session != voiceSessionGeneration) return;
                 mainHandler.post(() -> {
+                    if (session != voiceSessionGeneration) return;
                     isLiveConnecting = false;
                     isLiveActive = false;
                     stopVoiceTimer();
                     liveTranscriber = null;
                     updateMicButtonAppearance();
+                    showVoiceNotice(message, !SupabaseAuth.isSignedIn(VoiceKeyboardService.this)
+                        || message.contains("লগইন করুন"));
                 });
-                postStatus(trimStatus(message));
             }
 
             @Override
@@ -1408,6 +1426,7 @@ public class VoiceKeyboardService extends InputMethodService {
         mainHandler.post(() -> {
             isTranscribing = false;
             if (text != null && !text.isEmpty()) {
+                clearVoiceNotice();
                 String finalText = VoicePunctuation.apply(text);
                 if (session == voiceSessionGeneration && getCurrentInputConnection() != null) {
                     commitText(finalText);
@@ -1424,7 +1443,11 @@ public class VoiceKeyboardService extends InputMethodService {
                 } else if (file != null) {
                     file.delete();
                 }
-                if (error != null) setStatus(error);
+                if (error != null) {
+                    setStatus(error);
+                    showVoiceNotice(error, !SupabaseAuth.isSignedIn(this)
+                        || error.contains("লগইন করুন"));
+                }
             }
             updateMicButtonAppearance();
         });
@@ -1694,12 +1717,57 @@ public class VoiceKeyboardService extends InputMethodService {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(themeBg);
         root.setPadding(dp(4), dp(6), dp(4), dp(10));
+        root.addView(buildVoiceNotice(), matchWidthWrap());
         root.addView(buildTopBar(), matchWidthWrap());
         keyboardPanel = buildKeyboardPanel();
         root.addView(keyboardPanel, matchWidthWrap());
         applyVoiceOnlyVisibility();
         applyNavigationBarPadding(root);
         return root;
+    }
+
+    private View buildVoiceNotice() {
+        voiceNotice = new LinearLayout(this);
+        voiceNotice.setOrientation(LinearLayout.HORIZONTAL);
+        voiceNotice.setGravity(Gravity.CENTER_VERTICAL);
+        voiceNotice.setPadding(dp(12), dp(6), dp(8), dp(6));
+        voiceNotice.setMinimumHeight(dp(52));
+        voiceNotice.setBackground(roundRect(themeLiveIdleBg, dp(16)));
+        voiceNotice.setVisibility(View.GONE);
+        voiceNotice.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        voiceNoticeText = new TextView(this);
+        voiceNoticeText.setTextSize(13);
+        voiceNoticeText.setTextColor(themeKeyText);
+        voiceNotice.addView(voiceNoticeText, new LinearLayout.LayoutParams(0,
+            LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        voiceNoticeAction = new TextView(this);
+        voiceNoticeAction.setGravity(Gravity.CENTER);
+        voiceNoticeAction.setTextSize(14);
+        voiceNoticeAction.setTypeface(Typeface.DEFAULT_BOLD);
+        voiceNoticeAction.setTextColor(themeOnAccent);
+        voiceNoticeAction.setBackground(roundRect(themeAccent, dp(14)));
+        voiceNoticeAction.setPadding(dp(10), 0, dp(10), 0);
+        voiceNoticeAction.setFocusable(true);
+        voiceNotice.addView(voiceNoticeAction, new LinearLayout.LayoutParams(dp(88), dp(44)));
+        voiceNoticeAction.setOnClickListener(v -> {
+            if (voiceNoticeNeedsLogin) openKeyboardSettings(true);
+            else { clearVoiceNotice(); toggleVoiceInput(); }
+        });
+        return voiceNotice;
+    }
+
+    private void showVoiceNotice(String message, boolean needsLogin) {
+        if (voiceNotice == null) return;
+        voiceNoticeNeedsLogin = needsLogin;
+        voiceNoticeText.setText(message);
+        voiceNoticeAction.setText(needsLogin ? "লগইন" : "আবার চেষ্টা");
+        voiceNoticeAction.setContentDescription(needsLogin ? "অ্যাকাউন্টে লগইন খুলুন" : "ভয়েস আবার চালু করুন");
+        voiceNotice.setVisibility(View.VISIBLE);
+    }
+
+    private void clearVoiceNotice() {
+        voiceNoticeNeedsLogin = false;
+        if (voiceNotice != null) voiceNotice.setVisibility(View.GONE);
     }
 
     private void applyNavigationBarPadding(View root) {
@@ -2051,6 +2119,10 @@ public class VoiceKeyboardService extends InputMethodService {
     }
 
     private void openKeyboardSettings() {
+        openKeyboardSettings(false);
+    }
+
+    private void openKeyboardSettings(boolean showAccount) {
         try {
             Intent intent = new Intent(this, MainActivity.class);
             // Separate settings task: Back closes settings and returns to the app you were typing in.
@@ -2059,6 +2131,7 @@ public class VoiceKeyboardService extends InputMethodService {
                 | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
                 | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
             intent.putExtra(MainActivity.EXTRA_FROM_IME, true);
+            intent.putExtra(MainActivity.EXTRA_SHOW_ACCOUNT, showAccount);
             startActivity(intent);
         } catch (Exception e) {
             Toast.makeText(this, "সেটিংস খোলা যায়নি", Toast.LENGTH_SHORT).show();
@@ -2601,7 +2674,13 @@ public class VoiceKeyboardService extends InputMethodService {
         other.setPadding(dp(14), 0, dp(14), 0);
         other.setOnClickListener(v -> {
             dismissGlobePopup();
-            switchToNextInputMethod(false);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                switchToNextInputMethod(false);
+            } else {
+                android.view.inputmethod.InputMethodManager manager =
+                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                if (manager != null) manager.showInputMethodPicker();
+            }
         });
         card.addView(other, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)));
         globePopup = showAbove(card, anchor, dp(216), 0);

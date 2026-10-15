@@ -1,6 +1,8 @@
 package com.voicenoter.keyboard;
 
 import android.content.Context;
+import android.Manifest;
+import android.content.pm.PackageManager;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
@@ -82,6 +84,7 @@ public class SonioxLiveTranscriber {
                     SonioxKeyCache.getValidKey(appContext)
                 );
                 AtomicReference<AudioRecord> recordRef = new AtomicReference<>();
+                AtomicReference<Exception> keyError = new AtomicReference<>();
                 CountDownLatch parallel = new CountDownLatch(2);
 
                 Thread keyThread = new Thread(() -> {
@@ -91,6 +94,7 @@ public class SonioxLiveTranscriber {
                         }
                     } catch (Exception e) {
                         apiKeyRef.set(null);
+                        keyError.set(e);
                     } finally {
                         parallel.countDown();
                     }
@@ -99,6 +103,8 @@ public class SonioxLiveTranscriber {
                 Thread micThread = new Thread(() -> {
                     try {
                         recordRef.set(prepareAudioRecord());
+                    } catch (Exception e) {
+                        VoiceDiagnostics.record(appContext, "microphone", "unavailable", 0);
                     } finally {
                         parallel.countDown();
                     }
@@ -110,10 +116,18 @@ public class SonioxLiveTranscriber {
 
                 String apiKey = apiKeyRef.get();
                 AudioRecord record = recordRef.get();
+                if (!running.get()) {
+                    if (record != null) record.release();
+                    return;
+                }
                 if (apiKey == null || apiKey.isEmpty()) {
-                    fail(SupabaseAuth.isSignedIn(appContext)
-                        ? "Live চালু করা যায়নি, আবার চেষ্টা করুন"
-                        : "কিবোর্ড সেটিংসে (⚙) লগইন করুন");
+                    if (record != null) record.release();
+                    Exception error = keyError.get();
+                    if (error != null && !(error instanceof SupabaseAuth.AuthException)) {
+                        VoiceDiagnostics.record(appContext, "soniox_key", "network_unavailable", 0);
+                    }
+                    fail(error instanceof SupabaseAuth.AuthException ? error.getMessage()
+                        : "ভয়েস সার্ভারে পৌঁছানো যায়নি। সংযোগ দেখে আবার চেষ্টা করুন।");
                     return;
                 }
                 if (record == null) {
@@ -157,6 +171,8 @@ public class SonioxLiveTranscriber {
     }
 
     private AudioRecord prepareAudioRecord() {
+        if (appContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) return null;
         int channelConfig = AudioFormat.CHANNEL_IN_MONO;
         int encoding = AudioFormat.ENCODING_PCM_16BIT;
         audioMinBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, channelConfig, encoding);
@@ -210,7 +226,9 @@ public class SonioxLiveTranscriber {
             @Override
             public void onFailure(WebSocket socket, Throwable t, Response response) {
                 if (running.get()) {
-                    fail(t.getMessage() != null ? t.getMessage() : "WebSocket failed");
+                    VoiceDiagnostics.record(appContext, "soniox_live", "connection_failed",
+                        response != null ? response.code() : 0);
+                    fail("লাইভ সংযোগ হয়নি। ইন্টারনেট দেখে আবার চেষ্টা করুন।");
                 } else {
                     notifyStoppedOnce();
                 }
@@ -226,7 +244,13 @@ public class SonioxLiveTranscriber {
     private void startEarlyAudioCapture(AudioRecord record) {
         audioThread = new Thread(() -> {
             byte[] buffer = new byte[Math.max(audioMinBuffer, 512)];
-            record.startRecording();
+            try {
+                record.startRecording();
+            } catch (Exception e) {
+                VoiceDiagnostics.record(appContext, "microphone", "start_failed", 0);
+                fail("মাইক চালু হয়নি। অনুমতি দেখে আবার চেষ্টা করুন।");
+                return;
+            }
             notifyListeningOnce();
 
             while (running.get()) {
@@ -291,7 +315,11 @@ public class SonioxLiveTranscriber {
         try {
             JSONObject json = new JSONObject(text);
             if (json.has("error_code")) {
-                fail(json.optString("error_message", "Soniox error"));
+                int code = json.optInt("error_code", 0);
+                VoiceDiagnostics.record(appContext, "soniox_live", "server_error", code);
+                if (code == 401) SonioxKeyCache.clear(appContext);
+                fail(code == 401 ? "ভয়েস সংযোগের মেয়াদ শেষ। আবার চেষ্টা করুন।"
+                    : "ভয়েস সার্ভার অনুরোধটি গ্রহণ করেনি। আবার চেষ্টা করুন।");
                 return;
             }
             if (json.optBoolean("finished", false)) {

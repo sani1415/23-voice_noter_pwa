@@ -49,7 +49,7 @@ final class SupabaseAuth {
         return prefs(context).getString(KEY_EMAIL, "");
     }
 
-    static void signIn(Context context, String email, String password) throws AuthException {
+    static synchronized void signIn(Context context, String email, String password) throws AuthException {
         JSONObject body = new JSONObject();
         try {
             body.put("email", email);
@@ -64,7 +64,10 @@ final class SupabaseAuth {
 
         JSONObject session = res.json();
         String access = session.optString("access_token", "");
-        if (access.isEmpty()) throw new AuthException("লগইন করা যায়নি");
+        if (access.isEmpty() || session.optString("refresh_token", "").isEmpty()) {
+            VoiceDiagnostics.record(context, "sign_in", "invalid_response", res.code);
+            throw new AuthException("লগইন করা যায়নি");
+        }
         JSONObject user = session.optJSONObject("user");
         String userId = user != null ? user.optString("id", "") : "";
         if (!isActiveProfile(access, userId)) {
@@ -73,14 +76,14 @@ final class SupabaseAuth {
         save(context, session, email);
     }
 
-    static void signOut(Context context) {
+    static synchronized void signOut(Context context) {
         prefs(context).edit().clear().apply();
     }
 
     /**
      * A usable access token, refreshing it when it is about to expire; null when
-     * not signed in or the refresh failed. A refresh the server rejects (revoked
-     * or expired session) signs the keyboard out; a network failure does not.
+     * not signed in or the refresh failed. Only an explicit invalid-session code
+     * clears credentials. Temporary/unknown errors keep the session for retry.
      */
     static synchronized String validAccessToken(Context context) {
         SharedPreferences p = prefs(context);
@@ -99,14 +102,27 @@ final class SupabaseAuth {
             return null;
         }
         Response res = post("/auth/v1/token?grant_type=refresh_token", body, null);
-        if (res == null) return null;
-        if (res.code == 400 || res.code == 401) {
+        if (res == null) {
+            VoiceDiagnostics.record(context, "session_refresh", "network_unavailable", 0);
+            return AuthRefreshPolicy.unexpiredAccess(access, p.getLong(KEY_EXPIRES_AT, 0), now);
+        }
+        if (res.code < 200 || res.code >= 300) {
+            JSONObject error = res.json();
+            String code = error.optString("error_code", error.optString("code", "unknown"));
+            VoiceDiagnostics.record(context, "session_refresh", code, res.code);
+            if (!AuthRefreshPolicy.requiresSignIn(res.code, code)) {
+                return AuthRefreshPolicy.unexpiredAccess(access, p.getLong(KEY_EXPIRES_AT, 0), now);
+            }
             signOut(context);
+            SonioxKeyCache.clear(context);
             return null;
         }
-        if (res.code < 200 || res.code >= 300) return null;
         JSONObject session = res.json();
-        if (session.optString("access_token", "").isEmpty()) return null;
+        if (session.optString("access_token", "").isEmpty()
+            || session.optString("refresh_token", "").isEmpty()) {
+            VoiceDiagnostics.record(context, "session_refresh", "invalid_response", res.code);
+            return AuthRefreshPolicy.unexpiredAccess(access, p.getLong(KEY_EXPIRES_AT, 0), now);
+        }
         save(context, session, p.getString(KEY_EMAIL, ""));
         return session.optString("access_token", "");
     }
@@ -140,7 +156,8 @@ final class SupabaseAuth {
             .putString(KEY_REFRESH, session.optString("refresh_token", ""))
             .putLong(KEY_EXPIRES_AT, expiresAt)
             .putString(KEY_EMAIL, email)
-            .apply();
+            // Persist the rotated refresh token before another request/process restart.
+            .commit();
     }
 
     private static SharedPreferences prefs(Context context) {

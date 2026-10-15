@@ -63,6 +63,7 @@ public class MainActivity extends Activity {
 
     /** Opened from the IME settings gear — Back should leave this task, not open the PWA. */
     static final String EXTRA_FROM_IME = "from_ime";
+    static final String EXTRA_SHOW_ACCOUNT = "show_account";
 
     private static final int REQ_AUDIO = 1001;
 
@@ -99,6 +100,7 @@ public class MainActivity extends Activity {
         bindEnabledLanguages();
         bindTheme();
         bindAdvanced();
+        showAccountIfRequested();
     }
 
     @Override
@@ -106,6 +108,8 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         openedFromIme = intent != null && intent.getBooleanExtra(EXTRA_FROM_IME, false);
+        refreshAccountCard();
+        showAccountIfRequested();
     }
 
     @Override
@@ -122,6 +126,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refreshMicStatus();
+        refreshAccountCard();
     }
 
     // ---------- Setup ----------
@@ -221,6 +226,24 @@ public class MainActivity extends Activity {
         status.setTextColor(getColor(signedIn ? R.color.success : R.color.text_muted));
         findViewById(R.id.account_form).setVisibility(signedIn ? View.GONE : View.VISIBLE);
         findViewById(R.id.btn_sign_out).setVisibility(signedIn ? View.VISIBLE : View.GONE);
+        TextView diagnostics = findViewById(R.id.account_diagnostics);
+        String summary = VoiceDiagnostics.summary(this);
+        diagnostics.setText(summary);
+        View action = findViewById(R.id.account_diagnostics_action);
+        action.setVisibility(summary.isEmpty() ? View.GONE : View.VISIBLE);
+        action.setOnClickListener(v -> diagnostics.setVisibility(
+            diagnostics.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE));
+        if (summary.isEmpty()) diagnostics.setVisibility(View.GONE);
+    }
+
+    private void showAccountIfRequested() {
+        if (getIntent() == null || !getIntent().getBooleanExtra(EXTRA_SHOW_ACCOUNT, false)) return;
+        View card = findViewById(R.id.account_card);
+        card.post(() -> {
+            card.getParent().requestChildFocus(card, card);
+            if (!SupabaseAuth.isSignedIn(this)) findViewById(R.id.account_email).requestFocus();
+        });
+        getIntent().removeExtra(EXTRA_SHOW_ACCOUNT);
     }
 
     // ---------- Default language ----------

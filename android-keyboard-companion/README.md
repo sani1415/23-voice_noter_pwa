@@ -1,5 +1,18 @@
 # Voice Noter Android Keyboard Companion
 
+### 0.5.1 — Session recovery
+
+- Temporary or unknown refresh errors retain the login; only explicit invalid-session
+  error codes require signing in again. An access token that has not expired can
+  still be used while an early refresh is temporarily unavailable.
+- Live voice shows a persistent notice with a Login/Retry action instead of silently
+  returning to idle. Login opens the account section of keyboard settings.
+- The account section has an expandable last-error report containing only stage,
+  error code, HTTP status and time. It never stores tokens, response bodies or audio.
+- Failed/cancelled live startup releases its prepared microphone. Record-mode
+  audio continues to be retained for retries.
+- Validation: `gradlew.bat :app:testDebugUnitTest :app:assembleDebug :app:lintDebug`.
+
 Native Android input method for using the existing Voice Noter transcription backend from any app.
 
 The keyboard records microphone audio, sends it to:

@@ -115,6 +115,7 @@
 
         <!-- ===== Account card: voice input needs a Voice Notyper login ===== -->
         <LinearLayout
+            android:id="@+id/account_card"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
@@ -186,6 +187,23 @@
                 android:textColor="@color/primary"
                 android:textSize="14sp"
                 android:background="@drawable/btn_secondary"
+                android:visibility="gone" />
+            <Button
+                android:id="@+id/account_diagnostics_action"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:layout_marginTop="10dp"
+                android:text="সর্বশেষ সমস্যার তথ্য"
+                android:textAllCaps="false"
+                android:textColor="@color/primary"
+                android:textSize="13sp"
+                android:background="@drawable/btn_secondary"
+                android:visibility="gone" />
+            <TextView
+                android:id="@+id/account_diagnostics"
+                style="@style/HelperText"
+                android:layout_marginTop="8dp"
+                android:textIsSelectable="true"
                 android:visibility="gone" />
         </LinearLayout>
 

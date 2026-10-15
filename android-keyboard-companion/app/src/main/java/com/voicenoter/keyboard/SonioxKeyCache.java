@@ -73,7 +73,9 @@ public final class SonioxKeyCache {
     static KeyResult fetchTemporaryKey(Context context, String baseUrl) throws Exception {
         // The endpoint only serves signed-in users (see SupabaseAuth).
         String token = SupabaseAuth.validAccessToken(context);
-        if (token == null) throw new Exception("not signed in");
+        if (token == null) throw new SupabaseAuth.AuthException(SupabaseAuth.isSignedIn(context)
+            ? "লগইন যাচাই হয়নি। সংযোগ দেখে আবার চেষ্টা করুন।"
+            : "ভয়েস দিয়ে লিখতে আবার লগইন করুন।");
         String endpoint = baseUrl;
         while (endpoint.endsWith("/")) endpoint = endpoint.substring(0, endpoint.length() - 1);
         HttpURLConnection connection = (HttpURLConnection) new URL(endpoint + "/api/soniox-key").openConnection();
@@ -97,7 +99,15 @@ public final class SonioxKeyCache {
         while ((line = reader.readLine()) != null) response.append(line);
 
         if (code < 200 || code >= 300) {
-            throw new Exception("Soniox key HTTP " + code);
+            JSONObject error;
+            try { error = new JSONObject(response.toString()); }
+            catch (Exception ignored) { error = new JSONObject(); }
+            String errorCode = error.optString("code", "http_error");
+            VoiceDiagnostics.record(context, "soniox_key", errorCode, code);
+            throw new SupabaseAuth.AuthException(code == 401
+                ? "লগইন যাচাই হয়নি। কিবোর্ড সেটিংসে আবার লগইন করুন।"
+                : code == 403 ? "এই অ্যাকাউন্টে ভয়েস ব্যবহারের অনুমতি নেই।"
+                : "ভয়েস সার্ভারে সংযোগ হয়নি। আবার চেষ্টা করুন।");
         }
 
         JSONObject json = new JSONObject(response.toString());
