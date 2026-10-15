@@ -65,7 +65,19 @@ public final class SonioxKeyCache {
     }
 
     static String fetchAndCache(Context context, String baseUrl) throws Exception {
-        KeyResult result = fetchTemporaryKey(context, baseUrl);
+        // A dropped connection or a busy server is usually gone a second later: retry
+        // quietly. Login problems (AuthException) are final and shown right away.
+        KeyResult result = null;
+        for (int attempt = 0; result == null; attempt++) {
+            try {
+                result = fetchTemporaryKey(context, baseUrl);
+            } catch (SupabaseAuth.AuthException e) {
+                throw e;
+            } catch (Exception e) {
+                if (attempt >= SupabaseAuth.RETRY_DELAYS_MS.length) throw e;
+                SupabaseAuth.sleepQuietly(SupabaseAuth.RETRY_DELAYS_MS[attempt]);
+            }
+        }
         save(context, result.apiKey, result.expiresAtIso);
         return result.apiKey;
     }
@@ -104,6 +116,8 @@ public final class SonioxKeyCache {
             catch (Exception ignored) { error = new JSONObject(); }
             String errorCode = error.optString("code", "http_error");
             VoiceDiagnostics.record(context, "soniox_key", errorCode, code);
+            // Server-side trouble (5xx) is temporary: a plain exception, so it is retried.
+            if (code >= 500) throw new java.io.IOException("voice key server " + code);
             throw new SupabaseAuth.AuthException(code == 401
                 ? "লগইন যাচাই হয়নি। কিবোর্ড সেটিংসে আবার লগইন করুন।"
                 : code == 403 ? "এই অ্যাকাউন্টে ভয়েস ব্যবহারের অনুমতি নেই।"

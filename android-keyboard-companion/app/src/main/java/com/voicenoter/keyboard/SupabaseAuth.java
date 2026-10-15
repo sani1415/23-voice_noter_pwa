@@ -33,6 +33,10 @@ final class SupabaseAuth {
     private static final String KEY_EMAIL = "email";
     /** Refresh a little before expiry so a token never dies mid-request. */
     private static final long EXPIRY_MARGIN_S = 120;
+    /** Opening the keyboard renews a token that has less than this left. */
+    private static final long WARM_MARGIN_S = 15 * 60;
+    private static final int REFRESH_ATTEMPTS = 3;
+    static final long[] RETRY_DELAYS_MS = {700, 1800};
 
     private SupabaseAuth() {}
 
@@ -85,13 +89,26 @@ final class SupabaseAuth {
      * not signed in or the refresh failed. Only an explicit invalid-session code
      * clears credentials. Temporary/unknown errors keep the session for retry.
      */
-    static synchronized String validAccessToken(Context context) {
+    static String validAccessToken(Context context) {
+        return validAccessToken(context, EXPIRY_MARGIN_S);
+    }
+
+    /**
+     * Refreshes ahead of time when the token has less than {@code WARM_MARGIN_S} left.
+     * Called when the keyboard opens, so pressing the mic rarely needs the network
+     * for login at all. Blocking: call off the main thread.
+     */
+    static void warmUp(Context context) {
+        validAccessToken(context, WARM_MARGIN_S);
+    }
+
+    private static synchronized String validAccessToken(Context context, long marginS) {
         SharedPreferences p = prefs(context);
         String refresh = p.getString(KEY_REFRESH, "");
         if (refresh.isEmpty()) return null;
         String access = p.getString(KEY_ACCESS, "");
         long now = System.currentTimeMillis() / 1000;
-        if (!access.isEmpty() && p.getLong(KEY_EXPIRES_AT, 0) - EXPIRY_MARGIN_S > now) {
+        if (!access.isEmpty() && p.getLong(KEY_EXPIRES_AT, 0) - marginS > now) {
             return access;
         }
 
@@ -101,7 +118,13 @@ final class SupabaseAuth {
         } catch (Exception e) {
             return null;
         }
-        Response res = post("/auth/v1/token?grant_type=refresh_token", body, null);
+        // Mobile data often drops for a moment (waking up, switching towers): retry
+        // quietly before treating the server as unreachable.
+        Response res = null;
+        for (int attempt = 0; attempt < REFRESH_ATTEMPTS && res == null; attempt++) {
+            if (attempt > 0) sleepQuietly(RETRY_DELAYS_MS[attempt - 1]);
+            res = post("/auth/v1/token?grant_type=refresh_token", body, null);
+        }
         if (res == null) {
             VoiceDiagnostics.record(context, "session_refresh", "network_unavailable", 0);
             return AuthRefreshPolicy.unexpiredAccess(access, p.getLong(KEY_EXPIRES_AT, 0), now);
@@ -125,6 +148,14 @@ final class SupabaseAuth {
         }
         save(context, session, p.getString(KEY_EMAIL, ""));
         return session.optString("access_token", "");
+    }
+
+    static void sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static boolean isActiveProfile(String accessToken, String userId) throws AuthException {

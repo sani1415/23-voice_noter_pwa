@@ -238,6 +238,7 @@ public class VoiceKeyboardService extends InputMethodService {
      */
     private final java.util.ArrayDeque<Integer> liveExpectedCarets = new java.util.ArrayDeque<>();
     private boolean voiceOnlyMode = false;
+    private long lastWarmUpMs = 0;
     private String layoutLang = MainActivity.LANG_BN;
     private String voiceInputMode = MainActivity.MODE_RECORD;
     private String bnKarBase = null;
@@ -3362,11 +3363,31 @@ public class VoiceKeyboardService extends InputMethodService {
             .apply();
     }
 
+    /**
+     * When the keyboard opens: renew a login token that is close to expiry and, in
+     * Live mode, fetch the voice key, so that pressing the mic needs no extra round
+     * trip (and no lucky network moment). Own thread: the retries must not hold up a
+     * transcription waiting on {@code executor}. At most once a minute.
+     */
     private void prefetchSonioxKeyIfNeeded() {
-        if (!MainActivity.MODE_LIVE.equals(voiceInputMode)) return;
-        String endpoint = getEndpoint();
-        if (endpoint.isEmpty()) return;
-        SonioxKeyCache.prefetch(this, endpoint, executor);
+        if (!SupabaseAuth.isSignedIn(this)) return;
+        final Context app = getApplicationContext();
+        final boolean live = MainActivity.MODE_LIVE.equals(voiceInputMode);
+        final String endpoint = getEndpoint();
+        long now = System.currentTimeMillis();
+        boolean needKey = live && SonioxKeyCache.getValidKey(app) == null;
+        if (now - lastWarmUpMs < 60_000 && !needKey) return;
+        lastWarmUpMs = now;
+        new Thread(() -> {
+            SupabaseAuth.warmUp(app);
+            if (live && !endpoint.isEmpty() && SonioxKeyCache.getValidKey(app) == null) {
+                try {
+                    SonioxKeyCache.fetchAndCache(app, endpoint);
+                } catch (Exception ignored) {
+                    // Pressing the mic tries again and reports the problem then.
+                }
+            }
+        }, "voice-warm-up").start();
     }
 
     private String getEndpoint() {

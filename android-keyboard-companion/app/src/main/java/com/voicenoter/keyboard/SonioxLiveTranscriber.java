@@ -59,6 +59,10 @@ public class SonioxLiveTranscriber {
     private AudioRecord audioRecord;
     private Thread audioThread;
     private Listener listener;
+    private String baseUrl;
+    private String language;
+    /** One silent reconnect per session before an error reaches the user. */
+    private volatile boolean connectRetried = false;
     private int bufferedBytes = 0;
     private int audioMinBuffer = 0;
 
@@ -69,6 +73,9 @@ public class SonioxLiveTranscriber {
         wsReady.set(false);
         this.appContext = context.getApplicationContext();
         this.listener = listener;
+        this.baseUrl = baseUrl;
+        this.language = language;
+        connectRetried = false;
         finalText.setLength(0);
         partialText = "";
         synchronized (bufferLock) {
@@ -147,6 +154,38 @@ public class SonioxLiveTranscriber {
         }, "soniox-live-start").start();
     }
 
+    /**
+     * Drops the current socket and connects again after a short pause, once per
+     * session. Audio keeps buffering meanwhile, so nothing said is lost.
+     * False when the retry was already used.
+     */
+    private boolean retryConnectOnce(boolean freshKey) {
+        if (connectRetried || !running.get()) return false;
+        connectRetried = true;
+        synchronized (bufferLock) {
+            wsReady.set(false);
+        }
+        WebSocket old = webSocket;
+        webSocket = null;
+        if (old != null) old.cancel();
+        new Thread(() -> {
+            SupabaseAuth.sleepQuietly(700);
+            if (!running.get()) return;
+            try {
+                String key = freshKey ? null : SonioxKeyCache.getValidKey(appContext);
+                if (key == null) key = SonioxKeyCache.fetchAndCache(appContext, baseUrl);
+                if (running.get()) connectWebSocket(key, language);
+            } catch (Exception e) {
+                if (!(e instanceof SupabaseAuth.AuthException)) {
+                    VoiceDiagnostics.record(appContext, "soniox_key", "network_unavailable", 0);
+                }
+                fail(e instanceof SupabaseAuth.AuthException ? e.getMessage()
+                    : "ভয়েস সার্ভারে পৌঁছানো যায়নি। সংযোগ দেখে আবার চেষ্টা করুন।");
+            }
+        }, "soniox-reconnect").start();
+        return true;
+    }
+
     /** Microphone level of the most recent audio, 0 (silence) … 1 (loud). */
     public float level() {
         return running.get() ? level : 0f;
@@ -220,12 +259,16 @@ public class SonioxLiveTranscriber {
 
             @Override
             public void onMessage(WebSocket socket, String text) {
+                if (socket != webSocket) return; // a socket replaced by a reconnect
                 handleMessage(text);
             }
 
             @Override
             public void onFailure(WebSocket socket, Throwable t, Response response) {
+                if (socket != webSocket) return; // a socket replaced by a reconnect
                 if (running.get()) {
+                    // Mobile data drops for a moment; quietly try once more first.
+                    if (retryConnectOnce(false)) return;
                     VoiceDiagnostics.record(appContext, "soniox_live", "connection_failed",
                         response != null ? response.code() : 0);
                     fail("লাইভ সংযোগ হয়নি। ইন্টারনেট দেখে আবার চেষ্টা করুন।");
@@ -236,6 +279,7 @@ public class SonioxLiveTranscriber {
 
             @Override
             public void onClosed(WebSocket socket, int code, String reason) {
+                if (socket != webSocket && webSocket != null) return;
                 notifyStoppedOnce();
             }
         });
@@ -317,7 +361,11 @@ public class SonioxLiveTranscriber {
             if (json.has("error_code")) {
                 int code = json.optInt("error_code", 0);
                 VoiceDiagnostics.record(appContext, "soniox_live", "server_error", code);
-                if (code == 401) SonioxKeyCache.clear(appContext);
+                if (code == 401) {
+                    // The cached voice key went stale: get a fresh one and reconnect.
+                    SonioxKeyCache.clear(appContext);
+                    if (retryConnectOnce(true)) return;
+                }
                 fail(code == 401 ? "ভয়েস সংযোগের মেয়াদ শেষ। আবার চেষ্টা করুন।"
                     : "ভয়েস সার্ভার অনুরোধটি গ্রহণ করেনি। আবার চেষ্টা করুন।");
                 return;
