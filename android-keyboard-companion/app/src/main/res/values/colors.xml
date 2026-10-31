@@ -1,13 +1,19 @@
 <resources>
-    <color name="screen_bg">#f7f3ec</color>
-    <color name="card_bg">#ffffff</color>
-    <color name="primary">#2f6f6d</color>
-    <color name="primary_dark">#235754</color>
-    <color name="text_main">#202124</color>
-    <color name="text_muted">#5f6368</color>
-    <color name="stroke">#e3ddd0</color>
-    <color name="chip_bg">#efe9dd</color>
-    <color name="chip_text">#3c4043</color>
-    <color name="success">#2e7d32</color>
-    <color name="on_primary">#ffffff</color>
+    <!-- Sage on paper: the same palette as the keyboard's default (Warm) theme. -->
+    <color name="screen_bg">#F4F3EE</color>
+    <color name="card_bg">#FFFFFF</color>
+    <color name="primary">#3F6B4A</color>
+    <color name="primary_dark">#2F5338</color>
+    <color name="primary_tint">#DDE9DB</color>
+    <color name="text_main">#1E1F24</color>
+    <color name="text_muted">#5B5E66</color>
+    <color name="text_faint">#8A8C93</color>
+    <color name="stroke">#E7E5DD</color>
+    <color name="track">#EEEDE7</color>
+    <color name="chip_bg">#EEEDE7</color>
+    <color name="chip_text">#3B3E45</color>
+    <color name="success">#2F6B3C</color>
+    <color name="pending_tint">#FBEBCB</color>
+    <color name="pending_text">#6B4600</color>
+    <color name="on_primary">#FFFFFF</color>
 </resources>

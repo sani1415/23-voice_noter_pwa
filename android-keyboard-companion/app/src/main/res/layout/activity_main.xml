@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Keyboard settings. Sage-on-paper like the keyboard: a short header, a setup
+     check that folds to one line once everything is done, then grouped cards. -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/settings_scroll"
+    android:fitsSystemWindows="true"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:fillViewport="true"
@@ -9,161 +13,203 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="18dp">
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="20dp"
+        android:paddingBottom="28dp">
 
-        <!-- Header -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/app_name"
-            android:textSize="26sp"
-            android:textStyle="bold"
-            android:textColor="@color/text_main"
-            android:paddingTop="8dp" />
-
-        <TextView
-            android:id="@+id/subtitle"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Speak, and it types. Set up once below."
-            android:textSize="14sp"
-            android:textColor="@color/text_muted"
-            android:paddingTop="4dp"
-            android:paddingBottom="6dp" />
-
-        <!-- ===== Setup card ===== -->
+        <!-- ===== Header ===== -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/bg_card"
-            android:padding="18dp"
-            android:layout_marginTop="14dp">
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="4dp"
+            android:paddingBottom="4dp">
 
-            <TextView style="@style/SectionTitle" android:text="SETUP" />
+            <FrameLayout
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:background="@drawable/icon_tile">
+
+                <ImageView
+                    android:id="@+id/header_icon"
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/lc_mic"
+                    android:importantForAccessibility="no" />
+            </FrameLayout>
 
             <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="14dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/app_name"
+                    android:textSize="22sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/text_main" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="কিবোর্ড সেটিংস"
+                    android:textSize="14sp"
+                    android:textColor="@color/text_muted" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ===== Setup: one line when ready, the open steps otherwise ===== -->
+        <LinearLayout
+            android:id="@+id/setup_card"
+            style="@style/Card"
+            android:layout_marginTop="18dp">
+
+            <LinearLayout
+                android:id="@+id/setup_ready"
+                style="@style/Row"
+                android:minHeight="56dp">
+
+                <ImageView
+                    android:id="@+id/setup_ready_icon"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:src="@drawable/lc_check_circle"
+                    android:importantForAccessibility="no" />
+
+                <TextView
+                    style="@style/RowTitle"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="12dp"
+                    android:text="কিবোর্ড প্রস্তুত, সব ঠিক আছে"
+                    android:textColor="@color/success" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/setup_steps"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingBottom="4dp">
+                android:orientation="vertical">
+
+                <TextView
+                    style="@style/FieldLabel"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="2dp"
+                    android:text="শুরু করতে এই ধাপগুলো বাকি"
+                    android:textStyle="bold" />
+
+                <include
+                    android:id="@+id/step_mic"
+                    layout="@layout/setup_step" />
+
+                <include
+                    android:id="@+id/step_enable"
+                    layout="@layout/setup_step" />
+
+                <include
+                    android:id="@+id/step_default"
+                    layout="@layout/setup_step" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ===== Account ===== -->
+        <TextView style="@style/SectionLabel" android:text="অ্যাকাউন্ট" />
+
+        <LinearLayout
+            android:id="@+id/account_card"
+            style="@style/Card">
+
+            <LinearLayout
+                android:id="@+id/account_signed_in"
+                style="@style/Row">
+
+                <TextView
+                    android:id="@+id/account_avatar"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:gravity="center"
+                    android:background="@drawable/dot_done"
+                    android:textSize="17sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/primary_dark"
+                    android:importantForAccessibility="no" />
 
                 <LinearLayout
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
+                    android:layout_marginStart="12dp"
+                    android:layout_marginEnd="8dp"
                     android:orientation="vertical">
 
                     <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Microphone"
-                        android:textSize="15sp"
-                        android:textColor="@color/text_main" />
+                        android:id="@+id/account_email_text"
+                        style="@style/RowTitle"
+                        android:layout_width="match_parent"
+                        android:singleLine="true"
+                        android:ellipsize="middle" />
 
                     <TextView
-                        android:id="@+id/mic_status"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Checking…"
-                        android:textSize="12sp"
-                        android:textColor="@color/text_muted" />
+                        style="@style/RowSub"
+                        android:text="ভয়েস দিয়ে লেখা চালু আছে" />
                 </LinearLayout>
 
-                <Button
-                    android:id="@+id/btn_mic"
-                    android:layout_width="wrap_content"
-                    android:layout_height="44dp"
-                    android:minWidth="96dp"
-                    android:text="Grant"
-                    android:textAllCaps="false"
-                    android:textColor="@color/on_primary"
-                    android:textSize="14sp"
-                    android:background="@drawable/btn_primary" />
+                <TextView
+                    android:id="@+id/btn_sign_out"
+                    style="@style/PillButton"
+                    android:text="লগআউট" />
             </LinearLayout>
-
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:background="@color/stroke"
-                android:layout_marginTop="12dp"
-                android:layout_marginBottom="4dp" />
-
-            <Button
-                android:id="@+id/btn_enable"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:text="Enable keyboard in Android settings"
-                android:textAllCaps="false"
-                android:textColor="@color/primary"
-                android:textSize="14sp"
-                android:background="@drawable/btn_secondary"
-                android:layout_marginTop="10dp" />
-
-            <Button
-                android:id="@+id/btn_switch"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:text="Switch to this keyboard"
-                android:textAllCaps="false"
-                android:textColor="@color/primary"
-                android:textSize="14sp"
-                android:background="@drawable/btn_secondary"
-                android:layout_marginTop="10dp" />
-        </LinearLayout>
-
-        <!-- ===== Account card: voice input needs a Voice Notyper login ===== -->
-        <LinearLayout
-            android:id="@+id/account_card"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/bg_card"
-            android:padding="18dp"
-            android:layout_marginTop="14dp">
-
-            <TextView style="@style/SectionTitle" android:text="অ্যাকাউন্ট" />
-
-            <TextView
-                android:id="@+id/account_status"
-                style="@style/HelperText"
-                android:textSize="14sp"
-                android:text="ভয়েস দিয়ে লিখতে Voice Notyper-এর অ্যাকাউন্টে লগইন করুন।" />
 
             <LinearLayout
                 android:id="@+id/account_form"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical">
+                android:orientation="vertical"
+                android:paddingTop="10dp"
+                android:paddingBottom="12dp">
+
+                <TextView
+                    style="@style/HelperText"
+                    android:text="ভয়েস দিয়ে লিখতে Voice Notyper-এর ইমেইল আর পাসওয়ার্ড দিয়ে একবার লগইন করুন।" />
 
                 <EditText
                     android:id="@+id/account_email"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
+                    android:layout_height="48dp"
                     android:layout_marginTop="12dp"
                     android:background="@drawable/bg_input"
-                    android:padding="12dp"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
                     android:singleLine="true"
                     android:hint="ইমেইল"
                     android:autofillHints="emailAddress"
                     android:inputType="textEmailAddress"
-                    android:textSize="14sp"
-                    android:textColor="@color/text_main" />
+                    android:textSize="15sp"
+                    android:textColor="@color/text_main"
+                    android:textColorHint="@color/text_faint" />
 
                 <EditText
                     android:id="@+id/account_password"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
                     android:background="@drawable/bg_input"
-                    android:padding="12dp"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
                     android:singleLine="true"
                     android:hint="পাসওয়ার্ড"
                     android:autofillHints="password"
                     android:inputType="textPassword"
-                    android:textSize="14sp"
-                    android:textColor="@color/text_main" />
+                    android:textSize="15sp"
+                    android:textColor="@color/text_main"
+                    android:textColorHint="@color/text_faint" />
 
                 <Button
                     android:id="@+id/btn_sign_in"
@@ -174,346 +220,164 @@
                     android:textAllCaps="false"
                     android:textColor="@color/on_primary"
                     android:textSize="15sp"
+                    android:textStyle="bold"
+                    android:stateListAnimator="@null"
                     android:background="@drawable/btn_primary" />
             </LinearLayout>
 
-            <Button
-                android:id="@+id/btn_sign_out"
+            <LinearLayout
+                android:id="@+id/account_diagnostics_box"
                 android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="12dp"
-                android:text="লগআউট"
-                android:textAllCaps="false"
-                android:textColor="@color/primary"
-                android:textSize="14sp"
-                android:background="@drawable/btn_secondary"
-                android:visibility="gone" />
-            <Button
-                android:id="@+id/account_diagnostics_action"
-                android:layout_width="match_parent"
-                android:layout_height="44dp"
-                android:layout_marginTop="10dp"
-                android:text="সর্বশেষ সমস্যার তথ্য"
-                android:textAllCaps="false"
-                android:textColor="@color/primary"
-                android:textSize="13sp"
-                android:background="@drawable/btn_secondary"
-                android:visibility="gone" />
-            <TextView
-                android:id="@+id/account_diagnostics"
-                style="@style/HelperText"
-                android:layout_marginTop="8dp"
-                android:textIsSelectable="true"
-                android:visibility="gone" />
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <View style="@style/Divider" />
+
+                <TextView
+                    android:id="@+id/account_diagnostics_action"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:gravity="center_vertical"
+                    android:text="সর্বশেষ সমস্যার তথ্য দেখুন"
+                    android:textSize="14sp"
+                    android:textColor="@color/primary_dark"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/account_diagnostics"
+                    style="@style/HelperText"
+                    android:paddingBottom="12dp"
+                    android:textIsSelectable="true"
+                    android:visibility="gone" />
+            </LinearLayout>
         </LinearLayout>
 
-        <!-- ===== Typing card ===== -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/bg_card"
-            android:padding="18dp"
-            android:layout_marginTop="14dp">
+        <!-- ===== Voice ===== -->
+        <TextView style="@style/SectionLabel" android:text="ভয়েস" />
 
-            <TextView style="@style/SectionTitle" android:text="TYPING" />
+        <LinearLayout style="@style/Card">
 
-            <TextView style="@style/FieldLabel" android:text="Default keyboard language" />
+            <TextView style="@style/FieldLabel" android:text="মাইক চাপলে" />
 
-            <LinearLayout
-                android:id="@+id/lang_default_row"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:baselineAligned="false">
-
-                <Button android:id="@+id/lang_bn" style="@style/ChipPlaceholder" android:text="বাংলা" />
-                <Button android:id="@+id/lang_en" style="@style/ChipPlaceholder" android:text="English" />
-                <Button android:id="@+id/lang_ar" style="@style/ChipPlaceholder" android:text="العربية" />
-            </LinearLayout>
-
-            <TextView style="@style/FieldLabel" android:text="Voice input mode" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:baselineAligned="false">
-
-                <Button android:id="@+id/mode_record" style="@style/ChipPlaceholder" android:text="Record" />
-                <Button android:id="@+id/mode_live" style="@style/ChipPlaceholder" android:text="Live" />
+            <LinearLayout android:id="@+id/seg_mode" style="@style/Segmented">
+                <TextView android:id="@+id/mode_record" style="@style/SegItem" android:text="রেকর্ড" />
+                <TextView android:id="@+id/mode_live" style="@style/SegItem" android:text="লাইভ" />
             </LinearLayout>
 
             <TextView
                 android:id="@+id/mode_help"
                 style="@style/HelperText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingTop="8dp" />
+                android:paddingTop="8dp"
+                android:paddingBottom="12dp" />
 
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:background="@color/stroke"
-                android:layout_marginTop="14dp" />
+            <View style="@style/Divider" />
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingTop="12dp">
-
+            <LinearLayout style="@style/Row">
                 <LinearLayout
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Voice-only start"
-                        android:textSize="15sp"
-                        android:textColor="@color/text_main" />
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Open with the minimal bar, no letter keys"
-                        android:textSize="12sp"
-                        android:textColor="@color/text_muted" />
+                    <TextView style="@style/RowTitle" android:text="শুধু মাইক দিয়ে শুরু" />
+                    <TextView style="@style/RowSub" android:text="অক্ষরের বাটন ছাড়া ছোট কিবোর্ড খুলবে" />
                 </LinearLayout>
-
                 <Switch
                     android:id="@+id/switch_voice_only"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content" />
+                    android:layout_height="wrap_content"
+                    android:contentDescription="শুধু মাইক দিয়ে শুরু" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ===== Typing ===== -->
+        <TextView style="@style/SectionLabel" android:text="টাইপিং" />
+
+        <LinearLayout style="@style/Card" android:paddingBottom="10dp">
+
+            <TextView style="@style/FieldLabel" android:text="শুরুর ভাষা" />
+
+            <LinearLayout android:id="@+id/seg_lang" style="@style/Segmented">
+                <TextView android:id="@+id/lang_bn" style="@style/SegItem" android:text="বাংলা" />
+                <TextView android:id="@+id/lang_en" style="@style/SegItem" android:text="English" />
+                <TextView android:id="@+id/lang_ar" style="@style/SegItem" android:text="العربية" />
             </LinearLayout>
 
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:background="@color/stroke"
-                android:layout_marginTop="12dp" />
+            <TextView style="@style/FieldLabel" android:paddingTop="18dp" android:text="কিবোর্ডে যে ভাষাগুলো থাকবে" />
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingTop="12dp">
+                android:baselineAligned="false">
+                <TextView android:id="@+id/chk_bn" style="@style/ToggleChip" android:text="বাংলা" />
+                <TextView android:id="@+id/chk_en" style="@style/ToggleChip" android:text="English" />
+                <TextView android:id="@+id/chk_ar" style="@style/ToggleChip" android:text="العربية" />
+            </LinearLayout>
 
+            <TextView style="@style/FieldLabel" android:paddingTop="18dp" android:text="বাটনের আকার" />
+
+            <LinearLayout android:id="@+id/seg_size" style="@style/Segmented">
+                <TextView android:id="@+id/size_small" style="@style/SegItem" android:text="ছোট" />
+                <TextView android:id="@+id/size_medium" style="@style/SegItem" android:text="মাঝারি" />
+                <TextView android:id="@+id/size_large" style="@style/SegItem" android:text="বড়" />
+            </LinearLayout>
+
+            <View style="@style/Divider" android:layout_marginTop="14dp" />
+
+            <LinearLayout style="@style/Row" android:minHeight="56dp">
                 <LinearLayout
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Haptic feedback"
-                        android:textSize="15sp"
-                        android:textColor="@color/text_main" />
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Vibrate lightly on each key press"
-                        android:textSize="12sp"
-                        android:textColor="@color/text_muted" />
+                    <TextView style="@style/RowTitle" android:text="চাপলে হালকা কম্পন" />
                 </LinearLayout>
-
                 <Switch
                     android:id="@+id/switch_haptic"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingTop="12dp"
-                android:visibility="gone">
-
-                <LinearLayout
-                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Hold to talk"
-                        android:textSize="15sp"
-                        android:textColor="@color/text_main" />
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Press and hold mic to speak, release to stop"
-                        android:textSize="12sp"
-                        android:textColor="@color/text_muted" />
-                </LinearLayout>
-
-                <Switch
-                    android:id="@+id/switch_hold_to_talk"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingTop="12dp"
-                android:visibility="gone">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Phonetic Bangla"
-                        android:textSize="15sp"
-                        android:textColor="@color/text_main" />
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Removed — native Bangla keys only"
-                        android:textSize="12sp"
-                        android:textColor="@color/text_muted" />
-                </LinearLayout>
-
-                <Switch
-                    android:id="@+id/switch_phonetic_bn"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content" />
-            </LinearLayout>
-
-            <TextView style="@style/FieldLabel" android:text="Key size" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:baselineAligned="false">
-
-                <Button android:id="@+id/size_small" style="@style/ChipPlaceholder" android:text="S" />
-                <Button android:id="@+id/size_medium" style="@style/ChipPlaceholder" android:text="M" />
-                <Button android:id="@+id/size_large" style="@style/ChipPlaceholder" android:text="L" />
+                    android:contentDescription="চাপলে হালকা কম্পন" />
             </LinearLayout>
         </LinearLayout>
 
-        <!-- ===== Languages shown card ===== -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/bg_card"
-            android:padding="18dp"
-            android:layout_marginTop="14dp">
+        <!-- ===== Look ===== -->
+        <TextView style="@style/SectionLabel" android:text="চেহারা" />
 
-            <TextView style="@style/SectionTitle" android:text="LANGUAGES SHOWN ON KEYBOARD" />
-
-            <TextView
-                style="@style/HelperText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Pick which language keys appear in the bar. At least one must stay on."
-                android:paddingBottom="6dp" />
-
-            <CheckBox
-                android:id="@+id/chk_bn"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="বাংলা — Bangla"
-                android:textSize="15sp"
-                android:textColor="@color/text_main"
-                android:paddingTop="6dp" />
-
-            <CheckBox
-                android:id="@+id/chk_en"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="English"
-                android:textSize="15sp"
-                android:textColor="@color/text_main" />
-
-            <CheckBox
-                android:id="@+id/chk_ar"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="العربية — Arabic"
-                android:textSize="15sp"
-                android:textColor="@color/text_main" />
-        </LinearLayout>
-
-        <!-- ===== Theme card ===== -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/bg_card"
-            android:padding="18dp"
-            android:layout_marginTop="14dp">
-
-            <TextView style="@style/SectionTitle" android:text="KEYBOARD THEME" />
-
+        <LinearLayout style="@style/Card" android:paddingTop="16dp" android:paddingBottom="14dp">
+            <!-- Four mini keyboards, built by the activity from the real palettes. -->
             <LinearLayout
+                android:id="@+id/theme_row"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:baselineAligned="false">
-
-                <Button android:id="@+id/theme_warm" style="@style/ChipPlaceholder" android:text="Warm" />
-                <Button android:id="@+id/theme_light" style="@style/ChipPlaceholder" android:text="Light" />
-                <Button android:id="@+id/theme_dark" style="@style/ChipPlaceholder" android:text="Dark" />
-                <Button android:id="@+id/theme_colorful" style="@style/ChipPlaceholder" android:text="Color" />
-            </LinearLayout>
+                android:orientation="horizontal" />
         </LinearLayout>
 
-        <!-- ===== Advanced card ===== -->
+        <!-- ===== Advanced ===== -->
         <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/bg_card"
-            android:padding="18dp"
-            android:layout_marginTop="14dp"
-            android:layout_marginBottom="18dp">
+            style="@style/Card"
+            android:layout_marginTop="22dp"
+            android:paddingTop="0dp"
+            android:paddingBottom="0dp">
 
             <LinearLayout
                 android:id="@+id/advanced_header"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical">
-
+                style="@style/Row"
+                android:minHeight="56dp"
+                android:clickable="true"
+                android:focusable="true">
                 <TextView
-                    style="@style/SectionTitle"
+                    style="@style/RowTitle"
                     android:layout_width="0dp"
                     android:layout_weight="1"
-                    android:paddingBottom="0dp"
-                    android:text="ADVANCED" />
-
-                <TextView
+                    android:text="সার্ভারের ঠিকানা"
+                    android:textColor="@color/text_muted" />
+                <ImageView
                     android:id="@+id/advanced_chevron"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Show ▾"
-                    android:textSize="13sp"
-                    android:textColor="@color/primary" />
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/lc_chevron_down"
+                    android:importantForAccessibility="no" />
             </LinearLayout>
 
             <LinearLayout
@@ -521,60 +385,69 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
+                android:paddingBottom="14dp"
                 android:visibility="gone">
-
-                <TextView style="@style/FieldLabel" android:text="Server endpoint (PWA base URL)" />
 
                 <EditText
                     android:id="@+id/endpoint_input"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
+                    android:layout_height="48dp"
                     android:background="@drawable/bg_input"
-                    android:padding="12dp"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
                     android:singleLine="true"
                     android:textSize="14sp"
                     android:textColor="@color/text_main"
                     android:inputType="textUri" />
 
+                <TextView
+                    style="@style/HelperText"
+                    android:paddingTop="8dp"
+                    android:text="কিবোর্ড এই ঠিকানায় লেখা তৈরি করতে পাঠায়। নিজের সার্ভার না থাকলে বদলাবেন না।" />
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="horizontal"
-                    android:layout_marginTop="10dp"
-                    android:baselineAligned="false">
-
-                    <Button
-                        android:id="@+id/btn_save_endpoint"
-                        android:layout_width="0dp"
-                        android:layout_height="46dp"
-                        android:layout_weight="1"
-                        android:text="Save"
-                        android:textAllCaps="false"
-                        android:textColor="@color/on_primary"
-                        android:textSize="14sp"
-                        android:background="@drawable/btn_primary"
-                        android:layout_marginEnd="6dp" />
+                    android:layout_marginTop="12dp">
 
                     <Button
                         android:id="@+id/btn_reset_endpoint"
                         android:layout_width="0dp"
-                        android:layout_height="46dp"
+                        android:layout_height="44dp"
                         android:layout_weight="1"
-                        android:text="Reset default"
+                        android:layout_marginEnd="6dp"
+                        android:text="আগের মতো"
                         android:textAllCaps="false"
-                        android:textColor="@color/primary"
+                        android:textColor="@color/chip_text"
                         android:textSize="14sp"
-                        android:background="@drawable/btn_secondary"
-                        android:layout_marginStart="6dp" />
-                </LinearLayout>
+                        android:stateListAnimator="@null"
+                        android:background="@drawable/btn_secondary" />
 
-                <TextView
-                    style="@style/HelperText"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:paddingTop="10dp"
-                    android:text="This is the address the keyboard talks to for transcription. Leave it as default unless you host your own server." />
+                    <Button
+                        android:id="@+id/btn_save_endpoint"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="6dp"
+                        android:text="সেভ"
+                        android:textAllCaps="false"
+                        android:textColor="@color/on_primary"
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        android:stateListAnimator="@null"
+                        android:background="@drawable/btn_primary" />
+                </LinearLayout>
             </LinearLayout>
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/version_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:paddingTop="20dp"
+            android:textSize="12sp"
+            android:textColor="@color/text_faint" />
     </LinearLayout>
 </ScrollView>

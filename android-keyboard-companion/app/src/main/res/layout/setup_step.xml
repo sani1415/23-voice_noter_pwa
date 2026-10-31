@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One open setup step: status dot, what it is, and the button that does it. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:minHeight="60dp"
+    android:paddingTop="6dp"
+    android:paddingBottom="6dp">
+
+    <FrameLayout
+        android:id="@+id/step_dot"
+        android:layout_width="34dp"
+        android:layout_height="34dp"
+        android:background="@drawable/dot_todo">
+
+        <ImageView
+            android:id="@+id/step_icon"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_gravity="center"
+            android:importantForAccessibility="no" />
+    </FrameLayout>
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="8dp"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/step_title"
+            style="@style/RowTitle" />
+
+        <TextView
+            android:id="@+id/step_sub"
+            style="@style/RowSub" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/step_action"
+        style="@style/PillButton" />
+</LinearLayout>
