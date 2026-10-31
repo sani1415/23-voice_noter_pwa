@@ -73,16 +73,11 @@ public class VoiceKeyboardService extends InputMethodService {
     private static final String TOK_SHIFT = "\u0001SHIFT";
     private static final String TOK_SPACE = "\u0001SPACE";
     private static final String TOK_ENTER = "\u0001ENTER";
+    private static final String TOK_LETTERS = "\u0001LETTERS";
 
     private static final String[] BN_VOWEL_ROW = {
         "\u0985", "\u0986", "\u0987", "\u0988", "\u0989", "\u098A",
         "\u098F", "\u0990", "\u0993", "\u0994"
-    };
-    // Long-press on the bottom-left more key (Bangla page 1).
-    private static final String[] BN_DANDA_POPUP_SYMBOLS = {
-        "?", "!", "\u0982", "\u0983", "\u0981",
-        "\u09CE", "\u09C3", "\u098B", "\u09F3", "\u0965",
-        "\u2018", "\u2019", "\"", "-", "\u2026"
     };
     // \u09BE \u09BF \u09C0 \u09C1 \u09C2 \u09C3 \u09C7 \u09C8 \u09CB \u09CC \u2014 shown as "<cluster before caret> + sign", committed as the sign alone.
     private static final String[] BN_KAR_SIGNS = {
@@ -162,7 +157,11 @@ public class VoiceKeyboardService extends InputMethodService {
     private File pendingAudioFile;
     /** Transcript that arrived after its text field was gone; mic tap inserts it. */
     private String pendingTranscript;
+    /** The field wants digits: its input type says so, or its placeholder does. */
     private boolean numericField = false;
+    /** The numpad was opened by hand (long-press ১২৩) in an ordinary text field. */
+    private boolean numpadRequested = false;
+    private TextView numpadTag;
     private boolean passwordField = false;
     private LinearLayout bnRow1Layout;
     // Top bar: one row whose content follows the situation (see refreshTopBar()).
@@ -273,7 +272,9 @@ public class VoiceKeyboardService extends InputMethodService {
         super.onStartInputView(attribute, restarting);
         currentEditorInfo = attribute;
         int inputType = attribute != null ? attribute.inputType : 0;
-        numericField = isNumericInputType(inputType);
+        numericField = isNumericInputType(inputType) || (attribute != null
+            && NumericFieldHint.looksNumeric(inputType, attribute.hintText, attribute.label));
+        if (!restarting) numpadRequested = false;
         passwordField = isPasswordInputType(inputType);
         if (settingsChangedSinceBuild()) {
             loadPreferences();
@@ -1998,23 +1999,10 @@ public class VoiceKeyboardService extends InputMethodService {
         dot.setBackground(roundRect(themeAccent, dp(4)));
         group.addView(dot, iconLp(7, 8));
         TextView tag = new TextView(this);
-        tag.setText("নম্বরের ঘর — ইংরেজি অঙ্ক");
+        numpadTag = tag;
         tag.setTextSize(13);
         tag.setTextColor(themeMuted);
         group.addView(tag, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        TextView letters = new TextView(this);
-        letters.setText("অ আ ক");
-        letters.setTextSize(14);
-        letters.setTypeface(Typeface.DEFAULT_BOLD);
-        letters.setTextColor(themeFnText);
-        letters.setGravity(Gravity.CENTER);
-        letters.setPadding(dp(14), 0, dp(14), 0);
-        letters.setBackground(keyDrawable(themeKeyBg, dp(16)));
-        letters.setOnClickListener(v -> {
-            performKeyHaptic(v);
-            toggleMorePage();
-        });
-        group.addView(letters, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(32)));
         return group;
     }
 
@@ -2048,7 +2036,7 @@ public class VoiceKeyboardService extends InputMethodService {
     private void refreshTopBar() {
         if (topBar == null) return;
         boolean liveMode = MainActivity.MODE_LIVE.equals(voiceInputMode);
-        boolean numpad = numericField && morePage && !voiceOnlyMode;
+        boolean numpad = showsNumpad() && !voiceOnlyMode;
         View show;
         boolean mic = false;
         if (isRecording || (isLiveActive && !isLiveConnecting)) {
@@ -2070,6 +2058,7 @@ public class VoiceKeyboardService extends InputMethodService {
             pendingIcon.setImageResource(R.drawable.lc_refresh);
         } else if (numpad) {
             show = numpadGroup;
+            numpadTag.setText(numericField ? "নম্বরের ঘর — ইংরেজি অঙ্ক" : "শুধু অঙ্ক");
         } else if (suggestionsShown && !toolsRequested && !voiceOnlyMode) {
             show = suggestGroup;
             mic = true;
@@ -2184,13 +2173,11 @@ public class VoiceKeyboardService extends InputMethodService {
             performKeyHaptic(v);
             toggleMorePage();
         });
+        // Hold for the digits-only pad, in any field.
         moreKey.setOnLongClickListener(v -> {
-            if (MainActivity.LANG_BN.equals(layoutLang) && !morePage) {
-                finalizePendingComposing();
-                showSymbolPopup(v, BN_DANDA_POPUP_SYMBOLS);
-                return true;
-            }
-            return false;
+            performKeyHaptic(v);
+            openNumpad();
+            return true;
         });
         row.addView(moreKey, weighted(bottomKeyHeightDp, 1.3f));
 
@@ -2345,7 +2332,8 @@ public class VoiceKeyboardService extends InputMethodService {
             {"1", "2", "3", "-"},
             {"4", "5", "6", "+"},
             {"7", "8", "9", TOK_DELETE},
-            {".", "0", TOK_SPACE, TOK_ENTER},
+            // Bottom-left goes back to letters, where the thumb expects the page key.
+            {TOK_LETTERS, "0", ".", TOK_ENTER},
         };
         for (String[] keys : rows) {
             LinearLayout row = new LinearLayout(this);
@@ -2357,6 +2345,15 @@ public class VoiceKeyboardService extends InputMethodService {
                 int height = bottomKeyHeightDp + 8;
                 if (TOK_DELETE.equals(key)) {
                     row.addView(createDeleteKeyView(), weighted(height, weight));
+                } else if (TOK_LETTERS.equals(key)) {
+                    Button letters = fnTextKey("অ আ ক", 16);
+                    letters.setTypeface(Typeface.DEFAULT_BOLD);
+                    letters.setContentDescription("অক্ষরের কিবোর্ডে ফিরুন");
+                    letters.setOnClickListener(v -> {
+                        performKeyHaptic(v);
+                        toggleMorePage();
+                    });
+                    row.addView(letters, weighted(height, weight));
                 } else if (TOK_SPACE.equals(key)) {
                     FrameLayout space = new FrameLayout(this);
                     space.setBackground(keyDrawable(themeFnBg));
@@ -2389,7 +2386,7 @@ public class VoiceKeyboardService extends InputMethodService {
                         commitText(key);
                     });
                     String[] alts = "0".equals(key) ? new String[]{"+"}
-                        : ".".equals(key) ? new String[]{",", "*", "#", "/", "(", ")"} : null;
+                        : ".".equals(key) ? new String[]{",", "*", "#", "/", "(", ")", " "} : null;
                     if (alts != null) attachLongPressAlt(b, alts);
                     row.addView(b, weighted(height, weight));
                 }
@@ -2967,7 +2964,7 @@ public class VoiceKeyboardService extends InputMethodService {
         qwertyLetterButtons.clear();
         shiftKeyView = null;
         shiftState = 0;
-        boolean numpad = numericField && morePage;
+        boolean numpad = showsNumpad();
         if (bottomRowView != null) bottomRowView.setVisibility(numpad ? View.GONE : View.VISIBLE);
         if (numpad) {
             buildNumpad();
@@ -2989,12 +2986,28 @@ public class VoiceKeyboardService extends InputMethodService {
         refreshTopBar();
     }
 
+    private boolean showsNumpad() {
+        return morePage && (numericField || numpadRequested);
+    }
+
+    private void openNumpad() {
+        dismissSymbolPopup();
+        dismissPresetPopup();
+        hidePresetCompose();
+        finalizePendingComposing();
+        numpadRequested = true;
+        morePage = true;
+        resetBnKarState();
+        rebuildLetterRows();
+    }
+
     private void toggleMorePage() {
         dismissSymbolPopup();
         dismissPresetPopup();
         hidePresetCompose();
         finalizePendingComposing();
         morePage = !morePage;
+        if (!morePage) numpadRequested = false;
         resetBnKarState();
         rebuildLetterRows();
     }
