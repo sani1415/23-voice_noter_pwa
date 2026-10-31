@@ -1,6 +1,9 @@
 package com.voicenoter.keyboard;
 
 import android.Manifest;
+import android.content.ClipData;
+import android.content.ClipDescription;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -162,6 +165,20 @@ public class VoiceKeyboardService extends InputMethodService {
     /** The numpad was opened by hand (long-press ১২৩) in an ordinary text field. */
     private boolean numpadRequested = false;
     private TextView numpadTag;
+    // Clipboard chip: offers what was just copied, like Gboard.
+    private static final long CLIP_FRESH_MS = 3 * 60 * 1000;
+    private static final int CLIP_PREVIEW_CHARS = 40;
+    private ClipboardManager clipboard;
+    private final ClipboardManager.OnPrimaryClipChangedListener clipListener =
+        () -> mainHandler.post(() -> readClipboard(true));
+    private final Runnable clipExpiry = this::refreshTopBar;
+    private String clipText;
+    private boolean clipSensitive;
+    private long clipAtMs;
+    /** The current clip was pasted or dismissed: don't offer it again. */
+    private boolean clipDone;
+    private LinearLayout clipGroup;
+    private TextView clipLabel;
     private boolean passwordField = false;
     private LinearLayout bnRow1Layout;
     // Top bar: one row whose content follows the situation (see refreshTopBar()).
@@ -257,6 +274,9 @@ public class VoiceKeyboardService extends InputMethodService {
         super.onCreate();
         File pending = new File(getFilesDir(), PENDING_AUDIO_NAME);
         if (pending.exists() && pending.length() > 0) pendingAudioFile = pending;
+        clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        // The default keyboard may read the clipboard; other background apps may not.
+        if (clipboard != null) clipboard.addPrimaryClipChangedListener(clipListener);
     }
 
     @Override
@@ -296,6 +316,7 @@ public class VoiceKeyboardService extends InputMethodService {
         updateMicButtonAppearance();
         prefetchSonioxKeyIfNeeded();
         loadBnDictionaryIfNeeded();
+        readClipboard(false);
         onTextContextChanged();
         if (!SupabaseAuth.isSignedIn(this) && !passwordField) {
             showVoiceNotice("ভয়েস দিয়ে লিখতে লগইন করুন।", true);
@@ -792,6 +813,8 @@ public class VoiceKeyboardService extends InputMethodService {
         }
         mainHandler.removeCallbacks(repeatDeleteRunnable);
         mainHandler.removeCallbacks(voiceTickRunnable);
+        mainHandler.removeCallbacks(clipExpiry);
+        if (clipboard != null) clipboard.removePrimaryClipChangedListener(clipListener);
         executor.shutdownNow();
         super.onDestroy();
     }
@@ -1808,6 +1831,7 @@ public class VoiceKeyboardService extends InputMethodService {
         host.addView(buildStatusPill(), matchParentSquare());
         host.addView(buildPendingGroup(), matchParentSquare());
         host.addView(buildNumpadTag(), matchParentSquare());
+        host.addView(buildClipGroup(), matchParentSquare());
 
         micPill = buildMicPill();
         LinearLayout.LayoutParams micLp = new LinearLayout.LayoutParams(
@@ -1991,6 +2015,105 @@ public class VoiceKeyboardService extends InputMethodService {
         return group;
     }
 
+    private LinearLayout buildClipGroup() {
+        LinearLayout group = hRow();
+        clipGroup = group;
+        ImageButton tools = toolIcon(R.drawable.lc_tools, "টুলবার দেখান", () -> {
+            toolsRequested = true;
+            refreshTopBar();
+        });
+        LinearLayout.LayoutParams toolsLp = toolLp(40);
+        toolsLp.setMarginEnd(dp(2));
+        group.addView(tools, toolsLp);
+
+        LinearLayout pill = hRow();
+        pill.setBackground(roundRect(themeAccentTint, dp(19)));
+        pill.setPadding(dp(12), 0, dp(14), 0);
+        pill.addView(tintedIcon(R.drawable.lc_clipboard, themeAccentStrong, 17), iconLp(17, 8));
+        clipLabel = new TextView(this);
+        clipLabel.setTextSize(15);
+        clipLabel.setTextColor(themeAccentStrong);
+        clipLabel.setSingleLine(true);
+        clipLabel.setEllipsize(TextUtils.TruncateAt.END);
+        pill.addView(clipLabel, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        pill.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            pasteClip();
+        });
+        group.addView(pill, new LinearLayout.LayoutParams(0, dp(38), 1f));
+
+        FrameLayout dismiss = new FrameLayout(this);
+        dismiss.setContentDescription("পেস্টের প্রস্তাব সরান");
+        dismiss.addView(tintedIcon(R.drawable.lc_x, themeMuted, 17), centeredLp(17));
+        dismiss.setOnClickListener(v -> {
+            performKeyHaptic(v);
+            clipDone = true;
+            refreshTopBar();
+        });
+        group.addView(dismiss, new LinearLayout.LayoutParams(dp(36), dp(38)));
+        return group;
+    }
+
+    /**
+     * Reads the clipboard's text. {@code justCopied}: the change listener fired, so
+     * the clip is new now; otherwise (keyboard opening) its own timestamp is used.
+     */
+    private void readClipboard(boolean justCopied) {
+        if (clipboard == null) return;
+        String text = null;
+        boolean sensitive = false;
+        long at = 0;
+        try {
+            ClipData clip = clipboard.getPrimaryClip();
+            if (clip != null && clip.getItemCount() > 0) {
+                CharSequence raw = clip.getItemAt(0).coerceToText(this);
+                if (raw != null && raw.toString().trim().length() > 0) text = raw.toString();
+                ClipDescription desc = clip.getDescription();
+                if (desc != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) at = desc.getTimestamp();
+                    // Android 13+: password managers flag what they copy.
+                    if (desc.getExtras() != null) {
+                        sensitive = desc.getExtras().getBoolean("android.content.extra.IS_SENSITIVE", false);
+                    }
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // A clip from a removed app or an unreadable content URI: offer nothing.
+        }
+        if (text == null) {
+            clipText = null;
+        } else if (justCopied || !text.equals(clipText)) {
+            clipText = text;
+            clipSensitive = sensitive;
+            clipAtMs = justCopied || at <= 0 ? System.currentTimeMillis() : at;
+            clipDone = false;
+        }
+        mainHandler.removeCallbacks(clipExpiry);
+        if (clipOffered()) {
+            mainHandler.postDelayed(clipExpiry, clipAtMs + CLIP_FRESH_MS - System.currentTimeMillis() + 50);
+        }
+        if (clipLabel != null && clipText != null) {
+            String preview = clipText.replaceAll("\\s+", " ").trim();
+            if (preview.length() > CLIP_PREVIEW_CHARS) preview = preview.substring(0, CLIP_PREVIEW_CHARS) + "…";
+            clipLabel.setText(clipSensitive ? "পেস্ট করুন" : "পেস্ট: " + preview);
+            clipLabel.setContentDescription(clipSensitive ? "কপি করা লেখা পেস্ট করুন" : "পেস্ট করুন: " + preview);
+        }
+        refreshTopBar();
+    }
+
+    private boolean clipOffered() {
+        return clipText != null && !clipDone && !passwordField
+            && System.currentTimeMillis() - clipAtMs < CLIP_FRESH_MS;
+    }
+
+    private void pasteClip() {
+        if (clipText == null) return;
+        finalizePendingComposing();
+        commitText(clipText);
+        clipDone = true;
+        refreshTopBar();
+    }
+
     private LinearLayout buildNumpadTag() {
         LinearLayout group = hRow();
         numpadGroup = group;
@@ -2056,6 +2179,10 @@ public class VoiceKeyboardService extends InputMethodService {
             show = pendingGroup;
             pendingLabel.setText("আবার পাঠান");
             pendingIcon.setImageResource(R.drawable.lc_refresh);
+        } else if (clipOffered() && !suggestionsShown && !toolsRequested && !voiceOnlyMode) {
+            // Also over the numpad: a copied OTP is the classic case.
+            show = clipGroup;
+            mic = !numpad;
         } else if (numpad) {
             show = numpadGroup;
             numpadTag.setText(numericField ? "নম্বরের ঘর — ইংরেজি অঙ্ক" : "শুধু অঙ্ক");
@@ -2066,7 +2193,7 @@ public class VoiceKeyboardService extends InputMethodService {
             show = toolsGroup;
             mic = true;
         }
-        for (View v : new View[]{toolsGroup, suggestGroup, recordGroup, statusPill, pendingGroup, numpadGroup}) {
+        for (View v : new View[]{toolsGroup, suggestGroup, recordGroup, statusPill, pendingGroup, numpadGroup, clipGroup}) {
             v.setVisibility(v == show ? View.VISIBLE : View.GONE);
         }
         if (show == toolsGroup) {

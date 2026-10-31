@@ -10,8 +10,8 @@ android {
         applicationId "com.voicenoter.keyboard"
         minSdk 23
         targetSdk 35
-        versionCode 52
-        versionName "0.5.3"
+        versionCode 53
+        versionName "0.5.4"
     }
 
     applicationVariants.configureEach { variant ->
